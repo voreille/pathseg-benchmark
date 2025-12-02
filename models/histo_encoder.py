@@ -135,6 +135,13 @@ def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
         "n_blocks": n_blocks,
     }
 
+class ZeroMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # same shape, same device, no-op for residual: x + 0
+        return torch.zeros_like(x)
 
 class Encoder(nn.Module):
 
@@ -274,6 +281,12 @@ class Encoder(nn.Module):
                      pos_embed.flatten(1, 2)], dim=1)
 
             self.encoder.pos_embed = nn.Parameter(pos_embed)
+
+        if discard_last_mlp:
+            if hasattr(self.encoder.blocks[-1], "mlp"):
+                self.encoder.blocks[-1].mlp = ZeroMLP()
+            else:
+                raise ValueError("encoder has no mlp to discard")
 
     @staticmethod
     def interpolate_rel_pos(rel_pos,

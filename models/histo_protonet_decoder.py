@@ -69,9 +69,9 @@ class ProtoNetHead(nn.Module):
 
     def __init__(
         self,
-        prototypes: Tensor,           # [C, D_proj]
-        mean: Tensor,                 # [D_in]
-        proj_matrix: Tensor,          # [D_in, D_proj]
+        prototypes: Tensor,  # [C, D_proj]
+        mean: Tensor,  # [D_in]
+        proj_matrix: Tensor,  # [D_in, D_proj]
         class_counts: Optional[Tensor] = None,
         config: Optional[ProtoNetHeadConfig] = None,
         leace_eraser: Optional[LeaceEraser] = None,
@@ -127,8 +127,8 @@ class ProtoNetHead(nn.Module):
         else:
             raise ValueError("X must be [B,Q,D] or [N,D]")
 
-        Z = self._project(X_flat)          # [N, D_proj]
-        P = self.prototypes                # [C, D_proj]
+        Z = self._project(X_flat)  # [N, D_proj]
+        P = self.prototypes  # [C, D_proj]
 
         if self.metric == "l2":
             diff = Z.unsqueeze(1) - P.unsqueeze(0)  # [N, C, D_proj]
@@ -285,7 +285,7 @@ class ProtoNetDecoderFitter:
             X_np = X_used.cpu().numpy()
             pca.fit(X_np)
             proj_matrix = torch.from_numpy(pca.components_.T).float()  # [D_in, D_proj]
-            mean = torch.from_numpy(pca.mean_).float()                  # [D_in]
+            mean = torch.from_numpy(pca.mean_).float()  # [D_in]
             X_centered = X_used - mean
             Z = X_centered @ proj_matrix
             final_proj_dim = proj_matrix.shape[1]
@@ -348,7 +348,7 @@ class ProtoNetDecoderFitter:
 
         return head, fit_meta
 
-    def save_bundle(
+    def fit_and_save_bundle(
         self,
         path: str | PathLike[str],
         encoder_meta: dict[str, Any],
@@ -433,12 +433,12 @@ class ProtoNetDecoder(Encoder):
         """
         x: [B, C, H, W] → logits: [B, num_classes, Ht, Wt]
         """
-        tokens = self.tokens_from_images(x)     # [B, Q, D_in]
+        tokens = self.tokens_from_images(x)  # [B, Q, D_in]
         B, Q, D = tokens.shape
         Ht, Wt = self.grid_size
         if Q != Ht * Wt:
             raise ValueError(f"Q={Q} must equal Ht*Wt={Ht * Wt}.")
 
-        scores = self.head(tokens)             # [B, Q, C]
-        scores = scores.transpose(1, 2)        # [B, C, Q]
+        scores = self.head(tokens)  # [B, Q, C]
+        scores = scores.transpose(1, 2)  # [B, C, Q]
         return scores.reshape(B, self.num_classes, Ht, Wt)

@@ -220,7 +220,7 @@ def main(
     }
 
     output_path = Path(output_path)
-    fitter.save_bundle(output_path, encoder_meta=encoder_meta)
+    fitter.fit_and_save_bundle(output_path, encoder_meta=encoder_meta)
     click.echo(f"[OK] saved ProtoNet bundle to {output_path}")
 
 
