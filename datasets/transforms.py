@@ -199,7 +199,7 @@ class CustomTransforms(nn.Module):
         pad_w = max(0, self.img_size[-1] - img.shape[-1])
         padding = [0, 0, pad_w, pad_h]
 
-        img = F.pad(img, padding)
+        img = F.pad(img, padding, padding_mode="edge")
         target["masks"] = F.pad(target["masks"], padding)
 
         return img, target

@@ -21,7 +21,7 @@ model:
     network:
       class_path: models.histo_protonet_decoder.ProtoNetDecoder
       init_args:
-        prototypes_path: "/home/valentin/workspaces/benchmark-vfm-ss/output/anorak/h0_mini/protonet_stats_fold0.pt"
+        prototypes_path: "/home/valentin/workspaces/benchmark-vfm-ss/output/anorak/h0_mini_fewshot/protonet_stats_fold0.pt"
     tiler:
       class_path: training.tiler.GridPadTiler
       init_args:
@@ -30,15 +30,16 @@ model:
         weighted_blend: true
         pad_mode: "replicate"
         pad_value: 0.0
-
 data:
   class_path: datasets.anorak.ANORAKFewShot
   init_args:
-    overwrite_root: "/home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x_v2"
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    fewshot_csv: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x/fewshot_plan.csv
     img_size: [448, 448]
+    batch_size: 16
+    num_workers: 0
     prefetch_factor: 4
-    fold: 0
-    batch_size: 1
-    num_classes: 8
-    num_metrics: 1
-    ignore_idx: 255
+    num_iter_per_epoch: -1
+    support_set: 0   
+    n_shot: 10       
+

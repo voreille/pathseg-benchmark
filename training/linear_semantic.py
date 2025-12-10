@@ -1,11 +1,12 @@
 from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from torch.optim.lr_scheduler import PolynomialLR
 
-import wandb
 from training.histo_loss import CrossEntropyDiceLoss
 from training.lightning_module import LightningModule
 from training.tiler import Tiler
@@ -135,3 +136,45 @@ class LinearSemantic(LightningModule):
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        split = self.trainer.datamodule.predict_splits[dataloader_idx]
+        imgs, targets, img_ids = batch
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_logits = self(crops)  # (N,C,h,w)
+        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+
+        logits = self.revert_window_logits_semantic(
+            crop_logits, origins, img_sizes
+        )  # list of (C,H,W)
+
+        # per-pixel targets
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        outs = []
+        for i, logit in enumerate(logits):
+            pred = torch.argmax(logit, dim=0)  # (H,W)
+            tgt = targets_pp[i].long().to(pred.device)  # (H,W)
+
+            # mIoU (ignoring ignore_idx)
+            vals = []
+            for c in range(self.hparams.num_classes):
+                if c == self.ignore_idx:
+                    continue
+                inter = ((pred == c) & (tgt == c)).sum().item()
+                union = ((pred == c) | (tgt == c)).sum().item()
+                if union > 0:
+                    vals.append(inter / union)
+            miou = float(np.mean(vals)) if vals else float("nan")
+
+            fig_img = self.plot_semantic(imgs[i], tgt, logits=logit)
+            outs.append(
+                {
+                    "pil": fig_img,
+                    "miou": miou,
+                    "split": split,
+                    "img_id": img_ids[i],
+                }
+            )
+        return outs

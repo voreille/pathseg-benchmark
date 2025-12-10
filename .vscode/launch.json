@@ -38,6 +38,29 @@
             "justMyCode": false
         },
         {
+            "name": "Python: main.py fit ANORAK Linear Semantic FewShot",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "args": [
+                "fit",
+                "-c",
+                "/home/valentin/workspaces/benchmark-vfm-ss/configs/anorak_linear_semantic_fewshot.yaml",
+                "--root",
+                "data/",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Python: main.py fit ANORAK with Linear Mask2Former",
             "type": "debugpy",
             "request": "launch",
@@ -133,10 +156,10 @@
             "name": "Python: fit ProtoNet stats ANORAK",
             "type": "debugpy",
             "request": "launch",
-            "program": "fit_protonet_stats_with_leace.py",
+            "program": "fit_protonet.py",
             "args": [
                 "--root-dir",
-                "data/ANORAK_10x",
+                "data/ANORAK_10x_v2",
                 "--fold",
                 "0",
                 "--img-size",
@@ -147,7 +170,7 @@
                 "--num-workers",
                 "4",
                 "--num-classes",
-                "7",
+                "8",
                 "--ignore-idx",
                 "255",
                 "--encoder-id",
@@ -158,9 +181,11 @@
                 "--device",
                 "0",
                 // optional: cap tokens per class (balanced across images)
-                "--max-tokens-per-class", "5000",
+                // "--max-tokens-per-class",
+                // "5000",
                 // optional: PCA settings (pick ONE style)
-                // "--proj-dim", "128",
+                // "--proj-dim",
+                // "-1",
                 // or
                 "--pca-evr",
                 "0.95",
@@ -201,6 +226,121 @@
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false
-        }
+        },
+        {
+            "name": "Compute LEACE Position",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/compute_leace_position.py",
+            "console": "integratedTerminal",
+            // ---- arguments passed to the script ----
+            "args": [
+                "--root",
+                "/home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x",
+                "--fewshot_csv",
+                "/home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x/fewshot_plan.csv",
+                "--support_set",
+                "0",
+                "--n_shot",
+                "10",
+                "--encoder_id",
+                "h0-mini",
+                "--tile",
+                "448",
+                "--stride",
+                "224",
+                "--batch_size",
+                "1",
+                "--num_workers",
+                "4",
+                "--device",
+                "cuda",
+                "--output",
+                "/home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x/leace_pos/leace_pos_h0mini_s0_k10.pt"
+            ],
+            // optional: set env variables, CUDA device, etc.
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            }
+        },
+        {
+            "name": "Python: fit ProtoNet stats ANORAK FewShot",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "fit_protonet_fewshot.py",
+            "args": [
+                "--root-dir",
+                "data/ANORAK_10x",
+                "--img-size",
+                "448",
+                "448",
+                "--batch-size",
+                "1",
+                "--num-workers",
+                "4",
+                "--num-classes",
+                "7",
+                "--ignore-idx",
+                "255",
+                "--encoder-id",
+                "h0-mini",
+                "--metric",
+                "L2",
+                // devices: Click has --device / -d (multiple=True)
+                "--device",
+                "0",
+                // optional: cap tokens per class (balanced across images)
+                // "--max-tokens-per-class",
+                // "5000",
+                // optional: PCA settings (pick ONE style)
+                // "--proj-dim",
+                // "-1",
+                // or
+                "--pca-evr",
+                "0.9",
+                "--output-path",
+                "output/anorak/h0_mini_fewshot/protonet_stats_fold0.pt",
+                "--fewshot-csv",
+                "data/ANORAK_10x/fewshot_plan.csv",
+                "--n-shot",
+                "10",
+                "--support-set",
+                "0"
+
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Python: predict ANORAK ProtoNet FewShot with Lightning CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "main.py",
+            "args": [
+                "predict",
+                "-c",
+                "configs/anorak_protonet_semantic_fewshot.yaml",
+                "--root",
+                "data/",
+                "--trainer.callbacks+=training.pred_writer.SavePredictions",
+                "--trainer.callbacks.init_args.out_dir=output/anorak_proto_fewshot/preds_support0_kshot10",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+ 
     ]
 }

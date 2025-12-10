@@ -367,6 +367,7 @@ class ProtoNetDecoderFitter:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(bundle, path)
+        print(f"Proj shape of fitted ProtoNetHead: {head.proj_matrix.shape}")
 
 
 # -------------------------

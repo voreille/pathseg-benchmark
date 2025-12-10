@@ -71,11 +71,14 @@ class LeaceEraser:
 
     def __call__(self, x: Tensor) -> Tensor:
         """Apply the projection to the input tensor."""
+        # TODO: implement that class differently to have better .to semantics
+        input_dev = x.device
+        x = x.to(self.proj_left.device)
         delta = x - self.bias if self.bias is not None else x
 
         # Ensure we do the matmul in the most efficient order.
         x_ = x - (delta @ self.proj_right.mH) @ self.proj_left.mH
-        return x_.type_as(x)
+        return x_.type_as(x).to(input_dev)
 
     def to(self, device: torch.device | str) -> "LeaceEraser":
         """Move eraser to a new device."""

@@ -152,6 +152,7 @@ class Encoder(nn.Module):
         ckpt_path: str = "",
         sub_norm: bool = False,
         discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
     ):
         super().__init__()
 
@@ -282,8 +283,13 @@ class Encoder(nn.Module):
 
             self.encoder.pos_embed = nn.Parameter(pos_embed)
 
+        if discard_last_block:
+            print("Discarding last transformer block")
+            self.encoder.blocks = self.encoder.blocks[:-1]
+            
         if discard_last_mlp:
             if hasattr(self.encoder.blocks[-1], "mlp"):
+                print("Discarding last MLP layer")
                 self.encoder.blocks[-1].mlp = ZeroMLP()
             else:
                 raise ValueError("encoder has no mlp to discard")

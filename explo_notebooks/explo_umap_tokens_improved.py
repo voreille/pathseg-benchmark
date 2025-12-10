@@ -3,13 +3,12 @@ import sys
 
 sys.path.append("..")
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn.functional as F
-from matplotlib.colors import BoundaryNorm, ListedColormap
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 from tqdm import tqdm
@@ -17,9 +16,9 @@ from umap import UMAP
 
 from datasets.anorak import ANORAKFewShot
 from histo_utils.macenko_torch import normalize_and_unmix
-from models.histo_encoder import Encoder
-from models.histo_protonet_decoder import masks_to_token_hard_from_semantic
+from models.histo_linear_decoder import LinearDecoderBackbone
 from training.tiler import GridPadTiler
+from training.linear_semantic import LinearSemantic
 
 # %%
 root_dir = "/home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x"
@@ -225,9 +224,16 @@ def collect_token_embeddings(
     renorm_exclude_ignore: bool = True,
     drop_background_only: bool = True,
     progress: bool = True,
-    stain_normalize: bool = True,
+    stain_normalize: bool = False,
     seed: int = 0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[int, int], Dict[int, int]]:
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    Dict[int, int],
+    Dict[int, int],
+]:
     device = next(encoder.parameters()).device
     encoder.eval()
     torch.manual_seed(seed)
@@ -247,9 +253,18 @@ def collect_token_embeddings(
         pad_value=float(ignore_idx),
     )
 
-    all_X, all_y, all_b = [], [], []
+    all_X, all_y, all_b, all_pos = [], [], [], []
 
     it = tqdm(dataloader, desc="gather tokens", leave=False) if progress else dataloader
+
+    Ht, Wt = encoder.grid_size
+    gy, gx = torch.meshgrid(
+        torch.arange(Ht, device=device),
+        torch.arange(Wt, device=device),
+        indexing="ij",
+    )
+    positions = torch.stack([gy, gx], dim=-1).reshape(-1, 2).float()  # [Q,2]
+
     for batch_idx, (imgs, targets) in enumerate(it):
         # images come as list[tensor(H,W,3)] or similar; your tiler handles lists
 
@@ -266,6 +281,9 @@ def collect_token_embeddings(
         # Encode → tokens [N,Q,D]
         tokens = encoder(crops)  # (N,Q,D)
         N, Q, D = tokens.shape
+        X_flat = tokens.reshape(N * Q, D)  # (N*Q,D)
+        pos_expanded = positions.unsqueeze(0).expand(N, Q, 2)  # [N,Q,2]
+        pos_expanded = pos_expanded.reshape(N * Q, 2)  # [N*Q,2]
 
         # === NEW: label per token via downsample or purity pooling ===
         y_hard, valid = masks_to_token_labels_from_semantic(
@@ -288,17 +306,20 @@ def collect_token_embeddings(
             m_flat = m_flat & (y_flat != bg_idx)
 
         if m_flat.any():
-            Xv = tokens.reshape(N * Q, D)[m_flat].cpu()
+            Xv = X_flat[m_flat].cpu()
             yv = y_flat[m_flat].cpu()
             bv = torch.full((Xv.shape[0],), batch_idx, dtype=torch.long)
+            pos_v = pos_expanded[m_flat].cpu()
 
             all_X.append(Xv)
             all_y.append(yv)
             all_b.append(bv)
+            all_pos.append(pos_v)
 
     if not all_X:
         return (
             torch.empty(0),
+            torch.empty(0, dtype=torch.long),
             torch.empty(0, dtype=torch.long),
             torch.empty(0, dtype=torch.long),
             {},
@@ -308,9 +329,10 @@ def collect_token_embeddings(
     X_all = torch.cat(all_X, dim=0)
     y_all = torch.cat(all_y, dim=0)
     b_all = torch.cat(all_b, dim=0)
+    pos_all = torch.cat(all_pos, dim=0)
 
     # Balanced sampling
-    X_sel, y_sel, b_sel = [], [], []
+    X_sel, y_sel, b_sel, pos_sel = [], [], [], []
     seen_per_class, kept_per_class = {}, {}
     g = torch.Generator().manual_seed(seed)
 
@@ -330,11 +352,13 @@ def collect_token_embeddings(
         X_sel.append(X_all[idxs_sel])
         y_sel.append(y_all[idxs_sel])
         b_sel.append(b_all[idxs_sel])  # <-- NEW
+        pos_sel.append(pos_all[idxs_sel])  # <-- NEW
 
     X = torch.cat(X_sel, dim=0)
     y = torch.cat(y_sel, dim=0)
     b = torch.cat(b_sel, dim=0)  # <-- NEW
-    return X, y, b, seen_per_class, kept_per_class
+    pos = torch.cat(pos_sel, dim=0)  # <-- NEW
+    return X, y, b, pos, seen_per_class, kept_per_class
 
 
 # %%
@@ -440,6 +464,29 @@ def scatter_by_batch(Z, b, title="UMAP colored by image (batch_idx)", max_legend
     plt.show()
 
 
+def scatter_by_position_rgb(
+    Z: np.ndarray,
+    pos: np.ndarray,
+    Ht: int,
+    Wt: int,
+    title: str = "Embedding colored by (gy,gx) position",
+):
+    # normalize to [0,1]
+    gy = pos[:, 0] / max(Ht - 1, 1)
+    gx = pos[:, 1] / max(Wt - 1, 1)
+
+    # simple scheme: R = x, B = y, G = 0
+    colors = np.stack([gx, np.zeros_like(gx), gy], axis=1)
+
+    plt.figure(figsize=(7, 6))
+    plt.scatter(Z[:, 0], Z[:, 1], s=3, alpha=0.7, c=colors)
+    plt.title(title)
+    plt.xlabel("dim 1")
+    plt.ylabel("dim 2")
+    plt.tight_layout()
+    plt.show()
+
+
 # %%
 dm = ANORAKFewShot(
     root_dir,
@@ -454,15 +501,24 @@ dm = ANORAKFewShot(
 dm.setup("fit")
 train_loader = dm.train_dataloader()
 
+val_loader = dm.val_dataloader()
+
 # %%
-encoder = Encoder(encoder_id="h0-mini")
+linear_decoder = LinearDecoderBackbone(encoder_id="h0-mini", num_classes=7, img_size=(448, 448))
+pl_model = LinearSemantic.load_from_checkpoint(
+    "/home/valentin/workspaces/benchmark-vfm-ss/data/anorak/ulykhaa9/checkpoints/epoch=35-step=40000.ckpt",
+    network=linear_decoder,
+)
+encoder = pl_model.network
+
+# encoder = Encoder(encoder_id="h0-mini")
 device = torch.device("cuda:1")
 encoder = encoder.to(device)
 
 # %%
-X, y, b, seen, kept = collect_token_embeddings(
+X, y, b, pos, seen, kept = collect_token_embeddings(
     encoder=encoder.eval(),
-    dataloader=train_loader,  # or train_loader
+    dataloader=val_loader,  # or train_loader
     num_classes=7,
     ignore_idx=255,
     tile_size=448,
@@ -478,20 +534,58 @@ print("per-class seen:", seen)
 print("per-class kept:", kept)
 print("X", X.shape, "y", y.shape)
 
+Ht, Wt = encoder.grid_size
 # %%
 Z_pca = embed_pca(X, pca_dim=50, l2_normalize=True)
 scatter_2d(Z_pca, y, title="PCA of patch tokens")
 # %%
 scatter_by_batch(Z_pca, b.numpy(), title="UMAP colored by image (batch_idx)")
 # %%
-Z_umap = embed_umap(X, n_neighbors=15, min_dist=0.1, metric="cosine")
-scatter_2d(Z_umap, y, title="UMAP of patch tokens")
-# %%
-scatter_by_batch(Z_umap, b.numpy(), title="UMAP colored by image (batch_idx)")
+scatter_by_position_rgb(
+    Z_pca, pos.numpy(), Ht=Ht, Wt=Wt, title="UMAP colored by position (gy,gx)"
+)
 # %%
 Z_tsne = embed_tsne(X, perplexity=30, metric="cosine", n_iter=1000, l2_normalize=True)
 scatter_2d(Z_tsne, y, title="t-SNE of patch tokens")
 # %%
 scatter_by_batch(Z_tsne, b.numpy(), title="t-SNE colored by image (batch_idx)")
+# %%
+scatter_by_position_rgb(
+    Z_tsne, pos.numpy(), Ht=Ht, Wt=Wt, title="UMAP colored by position (gy,gx)"
+)
+# %%
+from leace.leace import LeaceFitter
+
+device = torch.device("cuda:1")
+X_dev = X.to(device)  # [N, D]
+pos_dev = pos.to(device)  # [N, 2]
+
+# 1) fit LEACE on positions
+fitter = LeaceFitter(
+    x_dim=X_dev.shape[1],
+    z_dim=2,
+    method="leace",  # or "orth"
+    device=device,
+)
+fitter.update(X_dev, pos_dev)
+eraser = fitter.eraser  # LeaceEraser
+
+# 2) apply LEACE to embeddings
+X_leace = eraser(X_dev).cpu()
+# %%
+Z_tsne = embed_tsne(
+    X_leace, perplexity=30, metric="cosine", n_iter=1000, l2_normalize=True
+)
+scatter_2d(Z_tsne, y, title="t-SNE of patch tokens")
+# %%
+scatter_by_batch(Z_tsne, b.numpy(), title="t-SNE colored by image (batch_idx)")
+# %%
+scatter_by_position_rgb(
+    Z_tsne, pos.numpy(), Ht=Ht, Wt=Wt, title="UMAP colored by position (gy,gx)"
+)
 
 # %%
+Z_umap = embed_umap(X, n_neighbors=15, min_dist=0.1, metric="cosine")
+scatter_2d(Z_umap, y, title="UMAP of patch tokens")
+# %%
+scatter_by_batch(Z_umap, b.numpy(), title="UMAP colored by image (batch_idx)")

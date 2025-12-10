@@ -8,29 +8,20 @@ trainer:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
       project: anorak
-      group: linear_head
-      job_type: baseline
-      tags: ["baseline", "wahoo", "10x", "448x448"]
+      group: fewshot
+      job_type: fewshot
+      tags: ["fewshot", "wahoo", "10x", "448x448"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
-data:
-  class_path: datasets.anorak.ANORAK
-  init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
-    img_size: [448, 448]
-    prefetch_factor: 4
-    num_workers: 0
-    batch_size: 16
-    fold: 0
-    epoch_repeat: 30
 model:
   class_path: training.linear_semantic.LinearSemantic
   init_args:
-    freeze_encoder: True
+    freeze_encoder: False
     network:
-      class_path: models.histo_linear_decoder.LinearDecoder
+      class_path: models.histo_linear_decoder.LinearDecoderLEACE
       init_args:
         encoder_id: "h0-mini"
+        leace_path: ""
     tiler:
       class_path: training.tiler.GridPadTiler
       init_args:
@@ -39,3 +30,15 @@ model:
         weighted_blend: true # or true
         pad_mode: "replicate" # optional; nice for images
         pad_value: 0.0
+data:
+  class_path: datasets.anorak.ANORAKFewShot
+  init_args:
+    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    fewshot_csv: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x/fewshot_plan.csv
+    img_size: [448, 448]
+    batch_size: 16
+    num_workers: 0
+    prefetch_factor: 4
+    num_iter_per_epoch: 1500
+    support_set: 0   
+    n_shot: 10       

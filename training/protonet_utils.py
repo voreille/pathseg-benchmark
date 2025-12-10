@@ -9,7 +9,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from datasets.anorak import ANORAKFewShot
+from datasets.anorak import ANORAKFewShotOld, ANORAKFewShot
 from training.tiler import GridPadTiler
 from models.histo_encoder import Encoder
 from leace.leace import LeaceEraser, LeaceFitter
@@ -76,9 +76,9 @@ def masks_to_token_hard_nearest(
 
 
 def subsample_tokens_balanced_by_image(
-    X: Tensor,          # [N, D]
-    y: Tensor,          # [N]
-    img_ids: Tensor,    # [N]
+    X: Tensor,  # [N, D]
+    y: Tensor,  # [N]
+    img_ids: Tensor,  # [N]
     num_classes: int,
     max_tokens_per_class: int,
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -232,8 +232,8 @@ def accumulate_features_and_labels(
         # Update LEACE on all tokens (positions concept)
         pos_leace_fitter.update(X_flat, pos_expanded)
 
-        y_flat = y_tokens.reshape(Nc * Q)           # [Nc*Q]
-        m = valid.reshape(Nc * Q)                   # [Nc*Q]
+        y_flat = y_tokens.reshape(Nc * Q)  # [Nc*Q]
+        m = valid.reshape(Nc * Q)  # [Nc*Q]
         token_img_ids = crop_img_ids.unsqueeze(1).expand(Nc, Q).reshape(Nc * Q)
 
         # keep only valid tokens
@@ -281,7 +281,7 @@ def build_train_loader(
     prefetch_factor: int = 2,
 ) -> DataLoader:
     """Reuse ANORAKFewShot exactly like your previous CLI."""
-    dm = ANORAKFewShot(
+    dm = ANORAKFewShotOld(
         root=root_dir,
         devices=devices,
         batch_size=batch_size,
@@ -292,6 +292,41 @@ def build_train_loader(
         ignore_idx=ignore_idx,
         prefetch_factor=prefetch_factor,
         fold=fold,
+    )
+    dm.setup("fit")
+    return dm.train_dataloader()
+
+
+def build_train_loader_fewshot(
+    root_dir: str,
+    devices: List[int],
+    batch_size: int,
+    num_workers: int,
+    img_size: Tuple[int, int],
+    num_classes: int,
+    num_metrics: int,
+    ignore_idx: int,
+    fewshot_csv: str,
+    n_shot: int = 1,
+    support_set: int = 0,
+    prefetch_factor: int = 2,
+) -> DataLoader:
+    """Reuse ANORAKFewShot exactly like your previous CLI."""
+    dm = ANORAKFewShot(
+        root=root_dir,
+        devices=devices,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        img_size=img_size,
+        num_classes=num_classes,
+        num_metrics=num_metrics,
+        ignore_idx=ignore_idx,
+        prefetch_factor=prefetch_factor,
+        n_shot=n_shot,
+        support_set=support_set,
+        fewshot_csv=fewshot_csv,
+        no_train_augmentation=True,
+        num_iter_per_epoch=-1,
     )
     dm.setup("fit")
     return dm.train_dataloader()
