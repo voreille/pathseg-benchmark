@@ -2,12 +2,12 @@ from typing import Optional
 
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 from torch.optim.lr_scheduler import PolynomialLR
 
-import wandb
-from training.lightning_module import LightningModule
-from training.mask2former_loss import Mask2formerLoss
-from training.tiler import Tiler
+from pathseg.training.lightning_module import LightningModule
+from pathseg.training.mask2former_loss import Mask2formerLoss
+from pathseg.training.tiler import Tiler
 
 
 class Mask2formerSemantic(LightningModule):
@@ -108,8 +108,7 @@ class Mask2formerSemantic(LightningModule):
                 targets[0],
                 logits=logits[0],
             )
-            if hasattr(self.trainer.logger.experiment, "log"):
-                self.trainer.logger.experiment.log({name: [wandb.Image(plot)]})  # type: ignore
+            self.log_wandb_image(name, plot, commit=False)
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")

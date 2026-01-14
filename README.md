@@ -1,173 +1,190 @@
-# Code for ["How to Benchmark Vision Foundation Models for Semantic Segmentation?"](https://tue-mps.github.io/benchmark-vfm-ss/) (CVPR'24 Foundation Models Workshop)
+# Few-Shot Semantic Segmentation Benchmark for Computational Pathology vFMs
 
-📢 **March 26, 2025** — Released our follow-up work: [Encoder-only Mask Transformer (EoMT)](https://www.tue-mps.org/eomt/)
+This repository provides a benchmark for few-shot semantic segmentation in histopathology, with a focus on evaluating vision foundation models (vFMs) under episodic training and evaluation.
 
-🥇 **September 30, 2024** — 1st place in ECCV'24 BRAVO Challenge! [Submission report](https://arxiv.org/abs/2409.17208) · [Workshop paper](https://arxiv.org/abs/2409.15107)
+The benchmark is designed to:
+
+* Support multiple heterogeneous segmentation datasets
+* Standardize preprocessing across scanners and magnifications
+* Enable fast episodic sampling without repeated mask I/O
+* Make it easy to add new datasets with minimal boilerplate
+
+---
+
+## Project structure
+
+### 1. Datasets and preprocessing
+
+For each dataset included in the benchmark, a dedicated preprocessing CLI is provided under:
+
+pathseg/preprocessing/<dataset_name>/prepare.py
+
+Each CLI takes as input the raw data downloaded from the original source and outputs a standardized directory structure compatible with the benchmark.
+
+Currently, preprocessing scripts accept:
+
+* --target-magnification (e.g. 10x or 20x)
+
+A global download-and-prepare script is intentionally not provided yet, as datasets are handled individually during early development.
+
+---
+
+### 2. Magnification and MPP handling
+
+Different scanners may report different microns-per-pixel (MPP) values for the same nominal magnification.
+
+We assume the following conventions:
+
+* 20x ≈ 0.5 MPP
+* 10x ≈ 1.0 MPP
+
+During preprocessing, images are resampled to the closest achievable target MPP using integer downsampling factors when possible.
+
+Example:
+An image reported as 20x with MPP = 0.24 will be downsampled by a factor of 2 to reach approximately MPP = 0.48.
+
+Original and target MPP values are stored in the dataset metadata.
+
+---
+
+### 3. Preprocessed data layout
+
+The preprocessed data directory can be located anywhere on disk. In the examples below, we assume it is stored under repo_root/data/.
+```
+preprocessed_data_rootdir/
+  datasets.csv
+  datasets_index.parquet <- contains (dataset_id[str], valid_labels[int], maybe label_map[dict]) 
+  class_index.parquet <- concatenation of each class_index (dataset_id, class_id, list of candidates for that class with sufficient min area containing the path of the image and mask, ...) 
+  dataset_name/
+    label_map.json
+    metadata.csv
+    class_index.parquet
+    images/
+      sample_001.png
+      sample_002.png
+    masks_semantic/
+      sample_001.png
+      sample_002.png
+
+```
+---
+
+### 4. Annotations format
+Annotations are expected to be stored as grayscale images uint8 as png or jpg.
+A label_map.json (str to int) is provided to map the int values to a string values.
+
+The label "Background" is reserverd and always mapped to 0.
+The label "Ignore" is reserved and always mapped to 255 (usually unnatoted pixels as it is the case in IGNITE are mapped to this)
+
+### 5. Dataset metadata
+
+metadata.csv (one row per image)
+
+This file is the primary entry point for dataset loading and episode construction. It is designed to be human-readable and easy to inspect.
+
+Required fields:
+
+* dataset_id: identifier of the dataset (typically the folder name)
+* sample_id: unique identifier within the dataset
+* image_relpath: relative path to the image file
+* mask_relpath: relative path to the semantic mask
+* width: image width in pixels
+* height: image height in pixels
+* mpp_x, mpp_y: microns per pixel
+* magnification: nominal magnification (e.g. 10, 20)
+* split: dataset split (e.g. train / val / test)
+
+Additional dataset-specific columns are allowed.
+
+---
+
+### 6. Per-class annotations (derived)
+
+To enable fast episode construction without repeatedly reading segmentation masks, per-image-per-class statistics are stored in a separate file.
+
+annotations.parquet (one row per image x class)
+
+Typical fields include:
+
+* dataset_id
+* sample_id
+* dataset_class_id
+* present
+* area_ratio
+* bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax
+
+This file is generated during preprocessing and treated as a cache.
+
+---
+
+## Episodic training and evaluation
+
+### Episode definition
+
+An episode is always constructed from a single dataset.
+
+The default episode construction for a C-way K-shot setting (adapted for semantic segmentation) follows these steps:
+
+1. Dataset sampling
+   Randomly sample one dataset from the available datasets.
+
+2. Class sampling
+   Sample C class (C <= number of classes of that dataset, for now on the dataset I want to use the minimal number of classes is 5)  
+   Derive the set of semantic classes present in the query images.
+   I guess like this it resampled naturally the underepresented classes
+
+3. Query sampling
+   For each class draw 1 or more representative patches of that class using the index class_index.parquet
+   and random crop patch from these patches 
+
+4. Support sampling
+   Same as 3. but K representative to have 
+
+5. Training / evaluation
+   The episode is processed using the dataset’s native label space.
+   Segmentation is treated as a standard multiclass problem within the episode.
+
+This design avoids cross-dataset label ambiguity and allows each dataset to define its own semantic segmentation task.
+
+---
 
 ## Getting started
-1. **Download datasets.**
-    Downloading is optional depending on which datasets you intend to use.
 
-    - **ADE20K**: [Download](http://data.csail.mit.edu/places/ADEchallenge/ADEChallengeData2016.zip)
-    - **PASCAL VOC**: [Download](http://host.robots.ox.ac.uk/pascal/VOC/voc2012/VOCtrainval_11-May-2012.tar)
-    - **Cityscapes**: [Download 1](https://www.cityscapes-dataset.com/file-handling/?packageID=3) | [Download 2](https://www.cityscapes-dataset.com/file-handling/?packageID=1)
-    - **GTA V**: [Download 1](https://download.visinf.tu-darmstadt.de/data/from_games/data/01_images.zip) | [Download 2](https://download.visinf.tu-darmstadt.de/data/from_games/data/02_images.zip) | [Download 3](https://download.visinf.tu-darmstadt.de/data/from_games/data/03_images.zip) | [Download 4](https://download.visinf.tu-darmstadt.de/data/from_games/data/04_images.zip) | [Download 5](https://download.visinf.tu-darmstadt.de/data/from_games/data/05_images.zip) | [Download 6](https://download.visinf.tu-darmstadt.de/data/from_games/data/06_images.zip) | [Download 7](https://download.visinf.tu-darmstadt.de/data/from_games/data/07_images.zip) | [Download 8](https://download.visinf.tu-darmstadt.de/data/from_games/data/08_images.zip) | [Download 9](https://download.visinf.tu-darmstadt.de/data/from_games/data/09_images.zip) | [Download 10](https://download.visinf.tu-darmstadt.de/data/from_games/data/10_images.zip) | [Download 11](https://download.visinf.tu-darmstadt.de/data/from_games/data/01_labels.zip) | [Download 12](https://download.visinf.tu-darmstadt.de/data/from_games/data/02_labels.zip) | [Download 13](https://download.visinf.tu-darmstadt.de/data/from_games/data/03_labels.zip) | [Download 14](https://download.visinf.tu-darmstadt.de/data/from_games/data/04_labels.zip) | [Download 15](https://download.visinf.tu-darmstadt.de/data/from_games/data/05_labels.zip) | [Download 16](https://download.visinf.tu-darmstadt.de/data/from_games/data/06_labels.zip) | [Download 17](https://download.visinf.tu-darmstadt.de/data/from_games/data/07_labels.zip) | [Download 18](https://download.visinf.tu-darmstadt.de/data/from_games/data/08_labels.zip) | [Download 19](https://download.visinf.tu-darmstadt.de/data/from_games/data/09_labels.zip) | [Download 20](https://download.visinf.tu-darmstadt.de/data/from_games/data/10_labels.zip)
+### 1. Download datasets
 
-2. **Environment setup.**
-    ```bash
-    conda create -n benchmark-vfm-ss python=3.10
-    conda activate benchmark-vfm-ss
-    ```
+Downloading datasets is optional and depends on which benchmarks you intend to run.
 
-3. **Install required packages.**
-    ```bash
-    pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu123
-    ```
-    (replace with your CUDA version if not 12.3).
+### 2. Environment setup
 
-4. **Fine-tune a model.**
-   Here's an example for fine-tuning DINOv2 on ADE20K with the default setup on GPU 0 with 1 worker for data loading:
-   ```bash
-   python main.py fit -c configs/ade20k_linear_semantic.yaml --root /data --data.num_workers 1 --trainer.devices [0] --model.network.encoder_name vit_base_patch14_dinov2
-   ```
-   (replace ```/data``` with the folder where you stored the datasets)  
+conda create -n pathseg-benchmark python=3.10 -y
+conda activate pathseg-benchmark
 
-## Reproducing results from the paper
-For the commands below, add `--root` to specify the path to where the datasets and checkpoints are stored and `--data.num_workers` to specify the number of workers for data     loading.
+python -m pip install --upgrade pip
 
-If using the BEiT models, download their checkpoints and convert them to timm format using `convert_beit_ckpt.ipynb`.
-- **Base**: [Download](https://github.com/addf400/files/releases/download/beit3/beit3_base_patch16_224.pth)
-- **Large**: [Download](https://github.com/addf400/files/releases/download/beit3/beit3_large_patch16_224.pth)
+### 3. Install Pytorch
 
-Please note that:
-- BEiT models need a checkpoint from above (which is loaded with `--model.network.ckpt_path`) and apply layernorm slightly differently (so the architecture is modified with `--model.network.sub_norm`).
-- EVA02 models somehow show significantly lower mIoU when using `torch.compile` (so it is turned off with `--no_compile`).
+pip install torch==2.2.2 torchvision==0.17.2 --extra-index-url https://download.pytorch.org/whl/cu123
 
-### Default setup:  
-1. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile```  
-2. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```  
-3. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2```  
-4. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli```  
-6. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae```  
-10. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b```  
+Replace cu123 with your CUDA version (e.g. cu121, cu118).
 
-### Freezing the encoder:  
-1. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile --model.freeze_encoder True```  
-2. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile --model.freeze_encoder True```  
-3. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2 --model.freeze_encoder True```  
-4. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True --model.freeze_encoder True```  
-5. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli --model.freeze_encoder True```  
-6. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b --model.freeze_encoder True```  
-7. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k --model.freeze_encoder True```  
-8. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k --model.freeze_encoder True```  
-9. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae --model.freeze_encoder True```  
-10. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b --model.freeze_encoder True```  
+### 3. Install this repo
 
-### Changing the decoder:  
-1. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile```  
-2. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```   
-3. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2```  
-4. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli```  
-6. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae```  
-10. ```python main.py fit -c configs/ade20k_mask2former_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b```  
+pip install -e ".[parquet]"
 
-### Scaling the model:  
-1. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_large_patch14_clip_336.merged2b --no_compile```  
-2. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_large_patch14_224.mim_m38m --no_compile```  
-3. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_large_patch14_dinov2```  
-4. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_large_patch16_224 --model.network.ckpt_path beit3_large_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_large_patch16_siglip_384.webli```  
-6. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_large_patch14_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_large_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_large_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_large_patch16_224.mae```  
-10. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name samvit_large_patch16.sa1b```  
+or in dev mode
 
-### Varying the patch size:  
-1. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile --model.network.patch_size 8```  
-2. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```  
-3. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2  --model.network.patch_size 8```  
-4. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True --model.network.patch_size 8```  
-5. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli --model.network.patch_size 8```  
-6. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b --model.network.patch_size 8```  
-7. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k --model.network.patch_size 8```  
-8. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k --model.network.patch_size 8```   
-9. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae --model.network.patch_size 8```  
-10. ```python main.py fit -c configs/ade20k_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b --model.network.patch_size 8```  
+pip install -e ".[dev,parquet]"
 
-### Changing the downstream dataset (PASCAL VOC):  
-1. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile```  
-2. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```  
-3. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2```  
-4. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli```  
-6. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae```  
-10. ```python main.py fit -c configs/pascal_voc_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b```  
+---
 
-### Changing the downstream dataset (Cityscapes):  
-1. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile```  
-2. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```  
-3. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2```  
-4. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path beit3_base_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli```  
-6. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae```  
-10. ```python main.py fit -c configs/cityscapes_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b```  
+## Training and evaluation
 
-### Introducing a domain shift:  
-1. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name eva02_base_patch16_clip_224.merged2b --no_compile```  
-2. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name eva02_base_patch14_224.mim_in22k --no_compile```  
-3. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name vit_base_patch14_dinov2```  
-4. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224 --model.network.ckpt_path - beit3_base_patch16_224.pth.timm --model.network.sub_norm True```  
-5. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_siglip_512.webli```  
-6. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_clip_224.dfn2b```  
-7. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in22k_ft_in1k```  
-8. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name deit3_base_patch16_384.fb_in1k```  
-9. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name vit_base_patch16_224.mae```  
-10. ```python main.py fit -c configs/gta5_linear_semantic.yaml --model.network.encoder_name samvit_base_patch16.sa1b```  
+TODO
+Episodic training and evaluation scripts will be added.
 
-## 📄 Citation
-If you use this code in your research or project, please cite the related paper(s):
+---
 
-```bibtex
-@inproceedings{kerssies2024benchmarking,
-  author={Kerssies, Tommie and de Geus, Daan and Dubbelman, Gijs},
-  title={How to Benchmark Vision Foundation Models for Semantic Segmentation?},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Workshops},
-  year={2024},
-}
-```
+## Reproducing results
 
-```bibtex
-@article{kerssies2024evaluating,
-  title = {First Place Solution to the ECCV 2024 BRAVO Challenge: Evaluating Robustness of Vision Foundation Models for Semantic Segmentation},
-  author = {Kerssies, Tommie and de Geus, Daan and Dubbelman, Gijs},
-  journal = {arXiv preprint arXiv:2409.17208},
-  year = {2024},
-}
-```
-
-```bibtex
-@inproceedings{vu2024bravo,
-  title = {The BRAVO Semantic Segmentation Challenge Results in UNCV2024},
-  author = {Vu, Tuan-Hung and Valle, Eduardo and Bursuc, Andrei and Kerssies, Tommie and de Geus, Daan and Dubbelman, Gijs and Qian, Long and Zhu, Bingke and Chen, Yingying and Tang, Ming and Wang, Jinqiao and Vojíř, Tomáš and Šochman, Jan and Matas, Jiří and Smith, Michael and Ferrie, Frank and Basu, Shamik and Sakaridis, Christos and Van Gool, Luc},
-  booktitle = {Proceedings of the European Conference on Computer Vision (ECCV) Workshops},
-  year = {2024},
-}
-```
-
-## Acknowledgement
-We borrow some code from Hugging Face Transformers (https://github.com/huggingface/transformers) (Apache-2.0 License)
+TODO
+This section will document how to reproduce the experiments reported in the paper.

@@ -1,22 +1,22 @@
 trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
-  val_check_interval: ~
-  check_val_every_n_epoch: 1
+  check_val_every_n_epoch: null
+  val_check_interval: 10 # to change if accumulate_grad_batches > 1
   accumulate_grad_batches: 1
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
-      project: anorak
-      group: linear_head
+      project: "fewshot-benchmark"
+      group: test
       job_type: baseline
       tags: ["baseline", "wahoo", "10x", "448x448"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 data:
-  class_path: datasets.anorak.ANORAK
+  class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    overwrite_root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_10x
     img_size: [448, 448]
     prefetch_factor: 4
     num_workers: 0
@@ -24,15 +24,15 @@ data:
     fold: 0
     epoch_repeat: 30
 model:
-  class_path: training.linear_semantic.LinearSemantic
+  class_path: pathseg.training.linear_semantic.LinearSemantic
   init_args:
     freeze_encoder: True
     network:
-      class_path: models.histo_linear_decoder.LinearDecoder
+      class_path: pathseg.models.histo_linear_decoder.LinearDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:
-      class_path: training.tiler.GridPadTiler
+      class_path: pathseg.training.tiler.GridPadTiler
       init_args:
         tile: 448
         stride: 224

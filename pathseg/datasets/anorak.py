@@ -7,17 +7,20 @@ from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
 from torch.utils.data import DataLoader
 
-from datasets.anorak_dataset import Dataset, PredictDataset, FewShotSupportDataset
-from datasets.lightning_data_module import LightningDataModule
-from datasets.transforms import CustomTransforms, CustomTransformsVaryingSize
-from datasets.utils import RepeatDataset
+from pathseg.datasets.anorak_dataset import (
+    Dataset,
+    PredictDataset,
+    FewShotSupportDataset,
+)
+from pathseg.datasets.lightning_data_module import LightningDataModule
+from pathseg.datasets.transforms import CustomTransforms, CustomTransformsVaryingSize
+from pathseg.datasets.utils import RepeatDataset
 
 
 class ANORAK(LightningDataModule):
     def __init__(
         self,
         root,
-        devices,
         num_workers: int = 0,
         fold: int = 0,
         img_size: tuple[int, int] = (448, 448),
@@ -33,7 +36,6 @@ class ANORAK(LightningDataModule):
     ) -> None:
         super().__init__(
             root=root,
-            devices=devices,
             batch_size=batch_size,
             num_workers=num_workers,
             num_classes=num_classes,
@@ -77,7 +79,7 @@ class ANORAK(LightningDataModule):
         )
 
     def compute_class_weights(self):
-        from datasets.stats import compute_class_weights_from_ids
+        from pathseg.datasets.stats import compute_class_weights_from_ids
 
         train_ids, _, _ = self._get_split_ids()
         return compute_class_weights_from_ids(
@@ -160,7 +162,6 @@ class ANORAKFewShotOld(LightningDataModule):
     def __init__(
         self,
         root,
-        devices,
         num_workers: int = 0,
         fold: int = 0,
         img_size: tuple[int, int] = (448, 448),
@@ -173,7 +174,6 @@ class ANORAKFewShotOld(LightningDataModule):
     ) -> None:
         super().__init__(
             root=root,
-            devices=devices,
             batch_size=batch_size,
             num_workers=num_workers,
             num_classes=num_classes,
@@ -283,7 +283,6 @@ class ANORAKFewShot(LightningDataModule):
     def __init__(
         self,
         root: str | Path,
-        devices,
         fewshot_csv: str | Path,
         support_set: int = 0,  # 0, 1, or 2
         n_shot: int = 10,  # k: 1..10
@@ -304,7 +303,6 @@ class ANORAKFewShot(LightningDataModule):
     ):
         super().__init__(
             root=root,
-            devices=devices,
             batch_size=batch_size,
             num_workers=num_workers,
             num_classes=num_classes,
@@ -319,7 +317,6 @@ class ANORAKFewShot(LightningDataModule):
         if overwrite_root:
             root = overwrite_root
         self.root = Path(root)
-        self.devices = devices
         self.fewshot_csv = Path(fewshot_csv)
         self.support_set = support_set
         self.n_shot = n_shot
@@ -339,7 +336,6 @@ class ANORAKFewShot(LightningDataModule):
         rank_zero_info(
             f"[ANORAKFewShot] support_set={support_set}, n_shot={n_shot}, csv={self.fewshot_csv}"
         )
-
 
         if not no_train_augmentation and train_transforms is None:
             self.train_transforms = CustomTransforms(
@@ -396,7 +392,7 @@ class ANORAKFewShot(LightningDataModule):
                 ignore_idx=self.ignore_idx,
                 transforms=self.train_transforms,
             )
- 
+
             self.test_dataset = Dataset(
                 test_ids,
                 self.images_dir,

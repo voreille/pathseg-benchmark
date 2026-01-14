@@ -3,17 +3,14 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import wandb
-import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
-import numpy as np
 
-from training.lightning_module import LightningModule
-from training.tiler import Tiler
-from training.histo_loss import CrossEntropyDiceLoss
+from pathseg.training.histo_loss import CrossEntropyDiceLoss
+from pathseg.training.lightning_module import LightningModule
+from pathseg.training.tiler import Tiler
 
 
 class FPNSemantic(LightningModule):
-
     def __init__(
         self,
         network: nn.Module,
@@ -59,7 +56,8 @@ class FPNSemantic(LightningModule):
 
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=self.ignore_idx,
-            weight=torch.tensor(weights) if weights is not None else None)
+            weight=torch.tensor(weights) if weights is not None else None,
+        )
         # self.criterion = CrossEntropyDiceLoss(class_weights=weights,
         #                                       ignore_index=self.ignore_idx,
         #                                       ce_weight=0.5,
@@ -76,18 +74,23 @@ class FPNSemantic(LightningModule):
         targets = torch.stack(targets).long()
 
         if self.deep_supervision:
-            loss_total = self.criterion(
-                output["main"],
-                targets,
-            ) * self.deep_supervision_weights.get(
-                "main", 1.0) + self.criterion(
+            loss_total = (
+                self.criterion(
+                    output["main"],
+                    targets,
+                )
+                * self.deep_supervision_weights.get("main", 1.0)
+                + self.criterion(
                     output.get("aux8"),
                     targets,
-                ) * self.deep_supervision_weights.get(
-                    "aux8", 0.0) + self.criterion(
-                        output.get("aux16"),
-                        targets,
-                    ) * self.deep_supervision_weights.get("aux16", 0.0)
+                )
+                * self.deep_supervision_weights.get("aux8", 0.0)
+                + self.criterion(
+                    output.get("aux16"),
+                    targets,
+                )
+                * self.deep_supervision_weights.get("aux16", 0.0)
+            )
         else:
             loss_total = self.criterion(
                 output["main"],
@@ -110,8 +113,7 @@ class FPNSemantic(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)["main"]
-        logits = self.revert_window_logits_semantic(crop_logits, origins,
-                                                    img_sizes)
+        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
 
         if is_notebook:
             return logits
@@ -126,9 +128,7 @@ class FPNSemantic(LightningModule):
                 targets[0],
                 logits=logits[0],
             )
-            if hasattr(self.trainer.logger.experiment, "log"):
-                self.trainer.logger.experiment.log({name: [wandb.Image(plot)]
-                                                    })  # type: ignore
+            self.log_wandb_image(name, plot, commit=False)
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
@@ -137,14 +137,12 @@ class FPNSemantic(LightningModule):
         optimizer = super().configure_optimizers()
 
         lr_scheduler = {
-            "scheduler":
-            PolynomialLR(
+            "scheduler": PolynomialLR(
                 optimizer,
                 int(self.trainer.estimated_stepping_batches),
                 self.poly_lr_decay_power,
             ),
-            "interval":
-            "step",
+            "interval": "step",
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}

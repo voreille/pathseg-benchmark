@@ -23,15 +23,15 @@ trainer:
   #     freq_epochs: 50 # every N epochs (set to 5 if it’s too chatty)
 
 model:
-  class_path: training.mask2former_semantic.Mask2formerSemantic
+  class_path: pathseg.training.mask2former_semantic.Mask2formerSemantic
   init_args:
     freeze_encoder: False
     network:
-      class_path: models.histo_mask2former_decoder.Mask2formerDecoder
+      class_path: pathseg.models.histo_mask2former_decoder.Mask2formerDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:
-      class_path: training.tiler.GridPadTiler
+      class_path: pathseg.training.tiler.GridPadTiler
       init_args:
         tile: 672
         stride: 384
@@ -39,9 +39,9 @@ model:
         pad_mode: "replicate" # optional; nice for images
         pad_value: 0.0
 data:
-  class_path: datasets.anorak.ANORAK
+  class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    overwrite_root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_10x
     img_size: [672, 672]
     prefetch_factor: 4
     num_workers: 0
@@ -49,7 +49,7 @@ data:
     fold: 0
     epoch_repeat: 30
     transforms:
-      class_path: datasets.transforms.CustomTransforms
+      class_path: pathseg.datasets.transforms.CustomTransforms
       init_args:
         img_size: [672, 672]
         scale_range: [0.8, 1.2]

@@ -3,8 +3,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from leace.leace import LeaceEraser
-from models.histo_encoder import Encoder
+from pathseg.leace.leace import LeaceEraser
+from pathseg.models.histo_encoder import Encoder
 
 
 class LinearDecoder(Encoder):

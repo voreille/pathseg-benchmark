@@ -5,8 +5,8 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerSinePositionEmbedding,
 )
 
-from models.histo_encoder import Encoder
-from models.decoder_block import DecoderBlock
+from pathseg.models.decoder_block import DecoderBlock
+from pathseg.models.histo_encoder import Encoder
 
 
 class Mask2formerDecoder(Encoder):

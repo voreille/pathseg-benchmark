@@ -12,7 +12,6 @@ class ADE20K(LightningDataModule):
     def __init__(
         self,
         root,
-        devices,
         num_workers: int,
         img_size: tuple[int, int] = (512, 512),
         batch_size: int = 1,
@@ -23,7 +22,6 @@ class ADE20K(LightningDataModule):
     ) -> None:
         super().__init__(
             root=root,
-            devices=devices,
             batch_size=batch_size,
             num_workers=num_workers,
             num_classes=num_classes,

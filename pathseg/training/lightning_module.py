@@ -16,7 +16,7 @@ from torch.optim import AdamW
 from torchmetrics.classification import MulticlassJaccardIndex
 from torchvision.transforms.v2.functional import resize
 
-from training.tiler import Tiler
+from pathseg.training.tiler import Tiler
 
 
 class LightningModule(lightning.LightningModule):

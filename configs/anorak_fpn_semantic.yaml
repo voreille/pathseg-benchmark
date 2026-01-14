@@ -6,15 +6,15 @@ trainer:
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
 model:
-  class_path: training.fpn_semantic.FPNSemantic
+  class_path: pathseg.training.fpn_semantic.FPNSemantic
   init_args:
     freeze_encoder: True
     network:
-      class_path: models.histoseg.segmentation_models.HistoViTSeg
+      class_path: pathseg.models.histoseg.segmentation_models.HistoViTSeg
       init_args:
         encoder_id: "uni2"
     tiler:
-      class_path: training.tiler.GridPadTiler
+      class_path: pathseg.training.tiler.GridPadTiler
       init_args:
         tile: 448
         stride: 384 # overlap = 64
@@ -22,9 +22,9 @@ model:
         pad_mode: "replicate"
         pad_value: 0.0
 data:
-  class_path: datasets.anorak.ANORAK
+  class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/benchmark-vfm-ss/data/ANORAK_10x
+    overwrite_root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_10x
     img_size: [448, 448]
     prefetch_factor: 4
     fold: 0

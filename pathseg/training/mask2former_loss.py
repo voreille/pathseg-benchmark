@@ -6,7 +6,7 @@ from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerLoss as TransformersMask2FormerLoss,
 )
 
-from training.mask2former_matcher import Mask2formerMatcher
+from pathseg.training.mask2former_matcher import Mask2formerMatcher
 
 
 class Mask2formerLoss(TransformersMask2FormerLoss):
