@@ -309,6 +309,11 @@ def main(
     images_dir.mkdir(exist_ok=True)
     masks_dir.mkdir(exist_ok=True)
 
+    src_data_info_csv = raw_data_dir / "data_overview.csv"
+    data_info_df = pd.read_csv(src_data_info_csv)
+    data_info_df = data_info_df[data_info_df["task"] == TASK]
+    data_info_df.to_csv(output_dir / "src_data_overview.csv", index=False)
+
     # Stage label map and load valid IDs from the staged copy (important for mode=move)
     src_label_map_file = raw_data_dir / f"{stain_folder}_label_map.json"
     if not src_label_map_file.exists():
