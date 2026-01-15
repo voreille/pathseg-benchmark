@@ -2,7 +2,7 @@ from typing import Dict, Optional, Iterable
 import torch
 import torch.nn as nn
 
-from .encoder import ViTEncoderPyramidHooks, ResNetPyramidAdapter
+from .pyramid_encoder import ViTEncoderPyramidHooks, ResNetPyramidAdapter
 from .segfpn import SegFPN
 
 
@@ -37,7 +37,7 @@ class HistoViTSeg(nn.Module):
             nn.Module, "save_hyperparameters",
             lambda *a, **k: None)  # no-op if not LightningModule
 
-        from ..histo_encoder import build_encoder as build_vit_encoder
+        from ..encoder import build_encoder as build_vit_encoder
         vit, vit_meta = build_vit_encoder(encoder_id=encoder_id)
 
         pixel_mean = torch.tensor(vit_meta["pixel_mean"]).reshape(1, -1, 1, 1)

@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from datasets.anorak import ANORAKFewShot
 from training.tiler import GridPadTiler
-from models.histo_encoder import Encoder
+from pathseg.models.encoder import Encoder
 from leace.leace import LeaceFitter
 
 

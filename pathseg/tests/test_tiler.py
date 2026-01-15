@@ -4,7 +4,7 @@ import torch
 from tqdm import tqdm
 
 from datasets.anorak import ANORAK
-from models.histo_linear_decoder import LinearDecoder
+from pathseg.models.linear_decoder import LinearDecoder
 from training.tiler import GridPadTiler
 
 

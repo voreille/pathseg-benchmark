@@ -1,4 +1,4 @@
-# Few-Shot Semantic Segmentation Benchmark for Computational Pathology vFMs
+# Semantic Segmentation Benchmark for Computational Pathology vFMs
 
 This repository provides a benchmark for few-shot semantic segmentation in histopathology, with a focus on evaluating vision foundation models (vFMs) under episodic training and evaluation.
 
@@ -6,7 +6,6 @@ The benchmark is designed to:
 
 * Support multiple heterogeneous segmentation datasets
 * Standardize preprocessing across scanners and magnifications
-* Enable fast episodic sampling without repeated mask I/O
 * Make it easy to add new datasets with minimal boilerplate
 
 ---
@@ -117,37 +116,6 @@ This file is generated during preprocessing and treated as a cache.
 
 ---
 
-## Episodic training and evaluation
-
-### Episode definition
-
-An episode is always constructed from a single dataset.
-
-The default episode construction for a C-way K-shot setting (adapted for semantic segmentation) follows these steps:
-
-1. Dataset sampling
-   Randomly sample one dataset from the available datasets.
-
-2. Class sampling
-   Sample C class (C <= number of classes of that dataset, for now on the dataset I want to use the minimal number of classes is 5)  
-   Derive the set of semantic classes present in the query images.
-   I guess like this it resampled naturally the underepresented classes
-
-3. Query sampling
-   For each class draw 1 or more representative patches of that class using the index class_index.parquet
-   and random crop patch from these patches 
-
-4. Support sampling
-   Same as 3. but K representative to have 
-
-5. Training / evaluation
-   The episode is processed using the dataset’s native label space.
-   Segmentation is treated as a standard multiclass problem within the episode.
-
-This design avoids cross-dataset label ambiguity and allows each dataset to define its own semantic segmentation task.
-
----
-
 ## Getting started
 
 ### 1. Download datasets
@@ -180,11 +148,11 @@ pip install -e ".[dev,parquet]"
 ## Training and evaluation
 
 TODO
-Episodic training and evaluation scripts will be added.
+
 
 ---
 
 ## Reproducing results
 
 TODO
-This section will document how to reproduce the experiments reported in the paper.
+

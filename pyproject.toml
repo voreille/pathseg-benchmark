@@ -14,7 +14,6 @@ authors = [
   { name = "Valentin Oreille" }
 ]
 
-[project]
 dependencies = [
   "click>=8.0",
   "pandas>=2.0",

@@ -7,7 +7,7 @@ from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
 from torch.utils.data import DataLoader
 
-from pathseg.datasets.anorak_dataset import (
+from pathseg.datasets.dataset import (
     Dataset,
     PredictDataset,
     FewShotSupportDataset,
