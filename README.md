@@ -12,7 +12,14 @@ The goal of this project is to make it easy to:
 If you are taking over this codebase, **start by reading this README and then inspect the YAML config files** used with the Lightning CLI. Most behavior is controlled from configuration rather than hard-coded logic.
 
 ---
+## TODO
+### IGNITE
+- [ ] Run training on all folds    (Currently using the original folds provided with the dataset; some folds contain 0 samples for certain classes, e.g. Muscle.   Options: discard problematic folds or redefine a stratified split.)
+- [ ] Store model checkpoints cleanly for reuse (naming + directory convention)
+- [ ] Perform clean test-set evaluation  (e.g. ensemble over fold-specific models)
+- [ ] Implement resampling to 10x if needed
 
+---
 ## Project structure (high-level)
 
 ```
@@ -60,7 +67,8 @@ Each `prepare.py` script exposes a small CLI. At minimum, it supports:
 
 * `--raw-data-dir`: path to the original downloaded dataset
 * `--output-dir`: destination directory for preprocessed data
-* `--target-magnification`: typically `10` or `20` (WARNING: not implemented for now, ANORAK and IGNITE are 20x by default)
+* `--target-magnification`: typically `10` or `20` 
+  ⚠️ Currently **not implemented** — ANORAK and IGNITE are fixed at 20x.
 
 Example:
 
@@ -289,5 +297,3 @@ If you are continuing development:
    * Writing a new `preprocessing/<dataset>/prepare.py`
    * Adding a dataset class under `pathseg/datasets/`
    * Creating a new config YAML
-
-This README + the configs should be enough to get productive quickly 🚀
