@@ -47,20 +47,24 @@ class IGNITE(LightningDataModule):
 
         root_dir = Path(root)
         self.fold = fold
-        rank_zero_info(f"[ANORAK] Initializing datamodule with fold = {self.fold}")
+        rank_zero_info(f"[IGNITE] Initializing datamodule with fold = {self.fold}")
         rank_zero_info(
-            f"[ANORAK] Initializing datamodule with batch_size = {batch_size}"
+            f"[IGNITE] Initializing datamodule with batch_size = {batch_size}"
         )
 
         self.images_dir = root_dir / "images"
         self.masks_dir = root_dir / "masks_semantic"
 
-        split_df = pd.read_csv(root_dir / "split_df.csv")
-        self.split_df = split_df[split_df["fold"] == fold]
+        data_overview_csv = root_dir / "data_overview.csv"
+
+        if not data_overview_csv.exists():
+            raise ValueError("data_overview.csv not found in the root directory")
+
+        self.data_overview_df = pd.read_csv(data_overview_csv)
 
         self.epoch_repeat = epoch_repeat
-
         self.save_hyperparameters(ignore=["transforms"])
+
         if transforms is not None:
             self.transforms = transforms
         else:
@@ -70,10 +74,14 @@ class IGNITE(LightningDataModule):
             )
 
     def _get_split_ids(self):
+        m_test = self.data_overview_df["split"] == "test"
+        m_val = self.data_overview_df["validation_fold"] == "fold" + str(self.fold)
+        m_train = self.data_overview_df["split"] == "train" and ~m_val
+
         return (
-            self.split_df[self.split_df["is_train"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_val"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_test"]]["image_id"].unique().tolist(),
+            self.data_overview_df[m_train]["name"].tolist(),
+            self.data_overview_df[m_val]["name"].tolist(),
+            self.data_overview_df[m_test]["name"].tolist(),
         )
 
     def compute_class_weights(self):
