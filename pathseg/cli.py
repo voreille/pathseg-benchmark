@@ -128,7 +128,6 @@ def main():
                 ModelCheckpoint(),
             ],
             "devices": 1,
-            "accumulate_grad_batches": 16,
             "gradient_clip_val": 1,
             "gradient_clip_algorithm": "norm",
         },

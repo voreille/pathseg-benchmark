@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import pandas as pd
+import torch
 from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
 from torch.utils.data import DataLoader
@@ -23,7 +24,7 @@ class IGNITE(LightningDataModule):
         fold: int = 0,
         img_size: tuple[int, int] = (448, 448),
         batch_size: int = 1,
-        num_classes: int = 15,
+        num_classes: int = 16,
         num_metrics: int = 1,
         scale_range=(0.8, 1.2),
         ignore_idx: int = 255,
@@ -55,7 +56,7 @@ class IGNITE(LightningDataModule):
         self.images_dir = root_dir / "images"
         self.masks_dir = root_dir / "masks_semantic"
 
-        data_overview_csv = root_dir / "data_overview.csv"
+        data_overview_csv = root_dir / "metadata.csv"
 
         if not data_overview_csv.exists():
             raise ValueError("data_overview.csv not found in the root directory")
@@ -76,12 +77,12 @@ class IGNITE(LightningDataModule):
     def _get_split_ids(self):
         m_test = self.data_overview_df["split"] == "test"
         m_val = self.data_overview_df["validation_fold"] == "fold" + str(self.fold)
-        m_train = self.data_overview_df["split"] == "train" and ~m_val
+        m_train = (self.data_overview_df["split"] == "train") & (~m_val)
 
         return (
-            self.data_overview_df[m_train]["name"].tolist(),
-            self.data_overview_df[m_val]["name"].tolist(),
-            self.data_overview_df[m_test]["name"].tolist(),
+            self.data_overview_df[m_train]["sample_id"].tolist(),
+            self.data_overview_df[m_val]["sample_id"].tolist(),
+            self.data_overview_df[m_test]["sample_id"].tolist(),
         )
 
     def compute_class_weights(self):
@@ -105,7 +106,8 @@ class IGNITE(LightningDataModule):
             self.val_dataset = Dataset(val_ids, self.images_dir, self.masks_dir)
 
             # compute once per fold for training
-            self.class_weights = self.compute_class_weights()
+            # self.class_weights = self.compute_class_weights()
+            self.class_weights = torch.ones(self.num_classes, dtype=torch.float32)
 
         if stage in ("test", None):
             self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)

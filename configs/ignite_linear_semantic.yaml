@@ -1,0 +1,41 @@
+trainer:
+  precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
+  max_steps: 40000
+  check_val_every_n_epoch: null
+  val_check_interval: 200 # to change if accumulate_grad_batches > 1
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: "pathseg-benchmark"
+      group: IGNITE
+      job_type: baseline
+      tags: ["baseline", "wahoo", "20x", "448x448", "IGNITE"]
+      save_dir: ./wandb
+      log_model: false # avoid artifact uploads in debug
+data:
+  class_path: pathseg.datasets.ignite.IGNITE
+  init_args:
+    root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite # Change path accordingly
+    img_size: [448, 448]
+    prefetch_factor: 4
+    num_workers: 0
+    batch_size: 16
+    fold: 0
+    epoch_repeat: 30
+model:
+  class_path: pathseg.training.linear_semantic.LinearSemantic
+  init_args:
+    freeze_encoder: True
+    network:
+      class_path: pathseg.models.linear_decoder.LinearDecoder
+      init_args:
+        encoder_id: "h0-mini" # "h0-mini" or "uni2" or "h-optimus-1"
+    tiler:
+      class_path: pathseg.training.tiler.GridPadTiler
+      init_args:
+        tile: 448
+        stride: 224
+        weighted_blend: true # or true
+        pad_mode: "replicate" # optional; nice for images
+        pad_value: 0.0
