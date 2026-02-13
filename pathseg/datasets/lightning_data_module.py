@@ -12,7 +12,7 @@ class LightningDataModule(lightning.LightningDataModule):
         img_size: tuple[int, int],
         num_classes: int,
         num_metrics: int,
-        ignore_idx: Optional[int] = None,
+        ignore_idx: int = 255,
         pin_memory: bool = True,
         persistent_workers: bool = True,
         prefetch_factor: int = 2,

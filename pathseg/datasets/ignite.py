@@ -31,6 +31,7 @@ class IGNITE(LightningDataModule):
         overwrite_root: Optional[str] = None,
         prefetch_factor: int = 2,
         transforms: Optional[nn.Module] = None,
+        return_background_mask: bool = True,
         epoch_repeat: int = 1,
     ) -> None:
         super().__init__(
@@ -64,6 +65,8 @@ class IGNITE(LightningDataModule):
         self.data_overview_df = pd.read_csv(data_overview_csv)
 
         self.epoch_repeat = epoch_repeat
+        self.return_background_mask = return_background_mask
+
         self.save_hyperparameters(ignore=["transforms"])
 
         if transforms is not None:
@@ -101,21 +104,41 @@ class IGNITE(LightningDataModule):
 
         if stage in ("fit", "validate", None):
             self.train_dataset = Dataset(
-                train_ids, self.images_dir, self.masks_dir, transforms=self.transforms
+                train_ids,
+                self.images_dir,
+                self.masks_dir,
+                transforms=self.transforms,
+                ignore_idx=self.ignore_idx,
+                return_background=self.return_background_mask,
             )
-            self.val_dataset = Dataset(val_ids, self.images_dir, self.masks_dir)
+            self.val_dataset = Dataset(
+                val_ids,
+                self.images_dir,
+                self.masks_dir,
+                ignore_idx=self.ignore_idx,
+                return_background=self.return_background_mask,
+            )
 
             # compute once per fold for training
             # self.class_weights = self.compute_class_weights()
             self.class_weights = torch.ones(self.num_classes, dtype=torch.float32)
 
         if stage in ("test", None):
-            self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
+            self.test_dataset = Dataset(
+                test_ids,
+                self.images_dir,
+                self.masks_dir,
+                ignore_idx=self.ignore_idx,
+                return_background=self.return_background_mask,
+            )
 
         if stage in ("predict", None):
             # self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
             self.test_dataset = PredictDataset(
-                test_ids, self.images_dir, self.masks_dir
+                test_ids,
+                self.images_dir,
+                self.masks_dir,
+                ignore_idx=self.ignore_idx,
             )
 
         return self

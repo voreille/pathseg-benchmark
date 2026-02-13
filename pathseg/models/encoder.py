@@ -146,7 +146,7 @@ class Encoder(nn.Module):
 
     def __init__(
         self,
-        encoder_id: str = "uni2",
+        encoder_id: str = "h0-mini",
         img_size: tuple[int, int] = (448, 448),
         ckpt_path: str = "",
         sub_norm: bool = False,

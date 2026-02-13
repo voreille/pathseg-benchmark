@@ -26,7 +26,7 @@ class Dataset(torch.utils.data.Dataset):
         image_ids,
         images_directory,
         masks_directory,
-        ignore_idx=-1,
+        ignore_idx=255,
         return_background=True,
         transforms=None,
         class_mapping=None,
