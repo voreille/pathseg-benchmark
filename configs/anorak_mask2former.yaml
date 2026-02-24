@@ -4,30 +4,21 @@ trainer:
   val_check_interval: ~
   check_val_every_n_epoch: 1
   accumulate_grad_batches: 1
-  logger: ~
-    # class_path: lightning.pytorch.loggers.wandb.WandbLogger
-    # init_args:
-    #   project: debug_anorak
-    #   group: debug
-    #   job_type: debug
-    #   tags: ["debug", "local"]
-    #   save_dir: ./wandb_debug
-    #   log_model: false # avoid artifact uploads in debug
-  # callbacks:
-  #   - class_path: lightning.pytorch.callbacks.ModelSummary
-  #     init_args:
-  #       max_depth: 2
-  # - class_path: training.callbacks.debug.DebugAugCallback
-  #   init_args:
-  #     num_batches: 2 # how many train batches to visualize per epoch
-  #     freq_epochs: 50 # every N epochs (set to 5 if it’s too chatty)
-
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: "pathseg-benchmark"
+      group: ANORAK
+      job_type: baseline
+      tags: ["baseline", "wahoo", "20x", "672x672", "ANORAK", "Mask2Former"]
+      save_dir: ./wandb
+      log_model: false # avoid artifact uploads in debug
 model:
   class_path: pathseg.training.mask2former_semantic.Mask2formerSemantic
   init_args:
     freeze_encoder: False
     network:
-      class_path: pathseg.models.histo_mask2former_decoder.Mask2formerDecoder
+      class_path: pathseg.models.mask2former_decoder.Mask2formerDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:
@@ -41,7 +32,7 @@ model:
 data:
   class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    overwrite_root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_10x
+    root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_20x
     img_size: [672, 672]
     prefetch_factor: 4
     num_workers: 0

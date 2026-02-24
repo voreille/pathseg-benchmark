@@ -29,7 +29,6 @@ class ANORAK(LightningDataModule):
         num_metrics: int = 1,
         scale_range=(0.8, 1.2),
         ignore_idx: int = 255,
-        overwrite_root: Optional[str] = None,
         prefetch_factor: int = 2,
         transforms: Optional[nn.Module] = None,
         epoch_repeat: int = 1,
@@ -44,8 +43,6 @@ class ANORAK(LightningDataModule):
             img_size=img_size,
             prefetch_factor=prefetch_factor,
         )
-        if overwrite_root:
-            root = overwrite_root
 
         root_dir = Path(root)
         self.fold = fold
@@ -54,8 +51,8 @@ class ANORAK(LightningDataModule):
             f"[ANORAK] Initializing datamodule with batch_size = {batch_size}"
         )
 
-        self.images_dir = root_dir / "image"
-        self.masks_dir = root_dir / "mask"
+        self.images_dir = root_dir / "images"
+        self.masks_dir = root_dir / "masks_semantic"
 
         split_df = pd.read_csv(root_dir / "split_df.csv")
         self.split_df = split_df[split_df["fold"] == fold]
@@ -100,6 +97,17 @@ class ANORAK(LightningDataModule):
 
             # compute once per fold for training
             self.class_weights = self.compute_class_weights()
+
+        if stage == "validate_random_crop":
+            self.train_dataset = Dataset(
+                train_ids, self.images_dir, self.masks_dir, transforms=self.transforms
+            )
+            self.val_dataset = Dataset(
+                val_ids, self.images_dir, self.masks_dir, transforms=self.transforms
+            )
+            self.test_dataset = Dataset(
+                test_ids, self.images_dir, self.masks_dir, transforms=self.transforms
+            )
 
         if stage in ("test", None):
             self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
@@ -188,8 +196,8 @@ class ANORAKFewShotOld(LightningDataModule):
         root_dir = Path(root)
         self.fold = fold
 
-        self.images_dir = root_dir / "image"
-        self.masks_dir = root_dir / "mask"
+        self.images_dir = root_dir / "images"
+        self.masks_dir = root_dir / "masks_semantic"
 
         split_df = pd.read_csv(root_dir / "split_df.csv")
         self.split_df = split_df[split_df["fold"] == fold]

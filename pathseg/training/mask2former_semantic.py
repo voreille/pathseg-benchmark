@@ -17,7 +17,7 @@ class Mask2formerSemantic(LightningModule):
         img_size: tuple[int, int],
         num_metrics: int,
         num_classes: int,
-        ignore_idx: int,
+        ignore_idx: int=255,
         lr: float = 1e-4,
         lr_multiplier_encoder: float = 0.1,
         weight_decay: float = 0.05,

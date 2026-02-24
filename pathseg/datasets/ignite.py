@@ -31,6 +31,7 @@ class IGNITE(LightningDataModule):
         overwrite_root: Optional[str] = None,
         prefetch_factor: int = 2,
         transforms: Optional[nn.Module] = None,
+        val_transforms: Optional[nn.Module] = None,
         return_background_mask: bool = True,
         epoch_repeat: int = 1,
     ) -> None:
@@ -77,6 +78,8 @@ class IGNITE(LightningDataModule):
                 scale_range=scale_range,
             )
 
+        self.val_transforms = val_transforms
+
     def _get_split_ids(self):
         m_test = self.data_overview_df["split"] == "test"
         m_val = self.data_overview_df["validation_fold"] == "fold" + str(self.fold)
@@ -115,6 +118,7 @@ class IGNITE(LightningDataModule):
                 val_ids,
                 self.images_dir,
                 self.masks_dir,
+                transforms=self.val_transforms,
                 ignore_idx=self.ignore_idx,
                 return_background=self.return_background_mask,
             )

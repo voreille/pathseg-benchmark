@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.models.mask2former.modeling_mask2former import (
     Mask2FormerMLPPredictionHead,
     Mask2FormerSinePositionEmbedding,
@@ -268,3 +269,220 @@ class ModifiedMask2formerDecoder(Encoder):
             mask_logits_per_layer,
             class_logits_per_layer,
         )
+
+
+class ConceptQuerySemanticDecoder(Encoder):
+    """
+    Semantic segmentation via a bank of learnable "concept queries".
+
+    Core idea:
+      - Learn K concept queries, each produces a concept mask (B, K, H, W).
+      - Each concept query also produces a semantic class distribution over C classes.
+      - Compose per-pixel semantic probabilities as:
+            P(class=c | x,y) = sum_k P(c | concept_k) * P(concept_k active at x,y)
+        then train with pixel-wise CrossEntropy.
+
+    This keeps concept masks available for XAI:
+      - visualize concept masks
+      - analyze which concepts contribute to each class and where.
+
+    Notes:
+      - This is NOT instance segmentation (no Hungarian matching).
+      - Works with ignore_index through CE loss (you said you already have that mechanism).
+    """
+
+    def __init__(
+        self,
+        img_size,
+        num_classes: int,         # semantic classes, e.g. 2 for {other, target}
+        encoder_id,
+        sub_norm: bool = False,
+        num_concepts: int = 64,   # K concept queries
+        num_attn_heads: int = 8,
+        num_blocks: int = 6,
+        concept_dim: int = 256,
+        ckpt_path: str = "",
+        # optional: make concepts "sharper" / more discrete
+        class_temperature: float = 1.0,
+        deep_supervision: bool = False,  # whether to return intermediate layer outputs for deep supervision
+    ):
+        super().__init__(
+            img_size=img_size,
+            encoder_id=encoder_id,
+            sub_norm=sub_norm,
+            ckpt_path=ckpt_path,
+        )
+
+        if num_classes < 2:
+            raise ValueError("num_classes should be >= 2 for semantic segmentation (e.g., {bg/other, target}).")
+
+        self.num_classes = num_classes
+        self.num_concepts = num_concepts
+        self.num_attn_heads = num_attn_heads
+        self.class_temperature = class_temperature
+        self.deep_supervision = deep_supervision
+
+        # project encoder token dim -> concept_dim
+        self.proj = nn.Linear(self.embed_dim, concept_dim)
+
+        # 2D sine pos-emb for spatial tokens (keys)
+        self.k_pos = Mask2FormerSinePositionEmbedding(
+            num_pos_feats=concept_dim // 2, normalize=True
+        )
+
+        # concept queries + their positional embeddings (query-slot identity)
+        self.q = nn.Embedding(num_concepts, concept_dim)
+        self.q_pos = nn.Embedding(num_concepts, concept_dim)
+
+        self.decoder = nn.ModuleList(
+            [DecoderBlock(concept_dim, num_attn_heads) for _ in range(num_blocks)]
+        )
+
+        # normalize concept tokens (standard)
+        self.q_norm = nn.LayerNorm(concept_dim)
+
+        # concept-to-mask projection head (per concept)
+        self.q_to_mask = Mask2FormerMLPPredictionHead(concept_dim, concept_dim, concept_dim)
+
+        # concept-to-class logits (per concept)
+        self.q_to_class = nn.Linear(concept_dim, num_classes)
+
+    @staticmethod
+    def _safe_log(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        return torch.log(x.clamp(min=eps, max=1.0 - eps))
+
+    def _concept_masks_from_qx(self, q_tokens: torch.Tensor, x_map: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            q_tokens: (K, B, C)
+            x_map:    (B, C, H, W)
+
+        Returns:
+            concept_mask_logits: (B, K, H, W)
+        """
+        # (K,B,C) -> (K,B,C)
+        q_feats = self.q_to_mask(self.q_norm(q_tokens))
+        # (K,B,C) -> (B,K,C)
+        q_feats = q_feats.permute(1, 0, 2)
+
+        B, K, C = q_feats.shape
+        Bx, Cx, H, W = x_map.shape
+        assert (B == Bx) and (C == Cx), "shape mismatch in _concept_masks_from_qx"
+
+        x_flat = x_map.reshape(B, C, H * W)                 # (B,C,HW)
+        masks_flat = torch.bmm(q_feats, x_flat)             # (B,K,HW)
+        return masks_flat.view(B, K, H, W)                  # (B,K,H,W)
+
+    def _concept_class_logits(self, q_tokens: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            q_tokens: (K,B,C)
+
+        Returns:
+            class_logits: (B,K,num_classes)
+        """
+        qn = self.q_norm(q_tokens)                          # (K,B,C)
+        logits = self.q_to_class(qn).transpose(0, 1)        # (B,K,C)
+        if self.class_temperature != 1.0:
+            logits = logits / self.class_temperature
+        return logits
+
+    def compose_semantic_logits(
+        self,
+        concept_mask_logits: torch.Tensor,  # (B,K,H,W)
+        concept_class_logits: torch.Tensor, # (B,K,C)
+    ) -> torch.Tensor:
+        """
+        Compose per-pixel semantic logits (B,C,H,W) from:
+          - concept activation maps (sigmoid of mask logits)
+          - per-concept class distribution (softmax of class logits)
+
+        P(class=c|x,y) = sum_k softmax(class_logits)[k,c] * sigmoid(mask_logits)[k,x,y]
+        semantic_logits = log(P)
+        """
+        mask_probs = torch.sigmoid(concept_mask_logits)                     # (B,K,H,W)
+        class_probs = F.softmax(concept_class_logits, dim=-1)               # (B,K,C)
+
+        # (B,K,C) and (B,K,H,W) -> (B,C,H,W)
+        semantic_probs = torch.einsum("bkc,bkhw->bchw", class_probs, mask_probs)
+
+        return self._safe_log(semantic_probs)                               # (B,C,H,W)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_concepts: bool = True,
+    ):
+        """
+        Returns:
+          If deep_supervision:
+            dict with lists per layer:
+              - semantic_logits_per_layer: list[(B,C,H,W)]
+              - concept_mask_logits_per_layer: list[(B,K,H,W)]  (optional)
+              - concept_class_logits_per_layer: list[(B,K,C)]   (optional)
+          Else:
+            dict with only final tensors.
+        """
+        # Encoder tokens: expected (B, N, embed_dim)
+        tokens = super().forward(x)
+        tokens = self.proj(tokens)                        # (B, N, concept_dim)
+
+        B, N, C = tokens.shape
+
+        # concept queries: (K,B,C)
+        q = self.q.weight[:, None, :].expand(-1, B, -1)
+
+        # values: (N,B,C)
+        v = tokens.transpose(0, 1)
+
+        # reshape tokens into 2D grid feature map for mask projection & pos-emb
+        # tokens: (B,N,C) -> (B,C,H,W) via grid_size from Encoder
+        x_map = tokens.transpose(1, 2).reshape(B, C, *self.grid_size)       # (B,C,H,W)
+
+        # keys: add 2D sine pos embedding in token space (N,B,C)
+        k = v + self.k_pos(x_map).flatten(2).permute(2, 0, 1)              # (N,B,C)
+
+        q_pos = self.q_pos.weight[:, None, :].expand(-1, B, -1)            # (K,B,C)
+
+        sem_logits_layers = []
+        concept_masks_layers = []
+        concept_class_layers = []
+
+        # decode
+        for block in self.decoder:
+            concept_mask_logits = self._concept_masks_from_qx(q, x_map)     # (B,K,H,W)
+            concept_class_logits = self._concept_class_logits(q)            # (B,K,C)
+            sem_logits = self.compose_semantic_logits(concept_mask_logits, concept_class_logits)
+
+            sem_logits_layers.append(sem_logits)
+            if return_concepts:
+                concept_masks_layers.append(concept_mask_logits)
+                concept_class_layers.append(concept_class_logits)
+
+            # Optional: you can keep your attention mask trick; for semantic it’s not required.
+            # If you want it, you can derive it from concept_mask_logits similarly.
+            q = block(q, k, v, q_pos)
+
+        # final prediction after last block
+        concept_mask_logits = self._concept_masks_from_qx(q, x_map)
+        concept_class_logits = self._concept_class_logits(q)
+        sem_logits = self.compose_semantic_logits(concept_mask_logits, concept_class_logits)
+
+        # if self.deep_supervision:
+        #     sem_logits_layers.append(sem_logits)
+        #     if return_concepts:
+        #         concept_masks_layers.append(concept_mask_logits)
+        #         concept_class_layers.append(concept_class_logits)
+
+        #     out = {"semantic_logits_per_layer": sem_logits_layers}
+        #     if return_concepts:
+        #         out["concept_mask_logits_per_layer"] = concept_masks_layers
+        #         out["concept_class_logits_per_layer"] = concept_class_layers
+        #     return out
+
+        # non-deep-supervised: return only final
+        # out = {"semantic_logits": sem_logits}
+        # if return_concepts:
+        #     out["concept_mask_logits"] = concept_mask_logits
+        #     out["concept_class_logits"] = concept_class_logits
+        return sem_logits

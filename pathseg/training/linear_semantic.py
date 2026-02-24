@@ -4,10 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import wandb
 from torch.optim.lr_scheduler import PolynomialLR
 
-from pathseg.training.histo_loss import CrossEntropyDiceLoss
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
 
@@ -43,37 +41,15 @@ class LinearSemantic(LightningModule):
         self.ignore_idx = ignore_idx
         self.poly_lr_decay_power = poly_lr_decay_power
 
+        weights = None
         if class_weights is not None:
             weights = class_weights
-        else:
-            # pull from datamodule in setup()
-            weights = None
-
-        # self._init_class_weights = weights
-        # self.criterion = None
 
         self.init_metrics_semantic(num_classes, ignore_idx, num_metrics)
         self.criterion = nn.CrossEntropyLoss(
             ignore_index=self.ignore_idx,
             weight=torch.tensor(weights) if weights is not None else None,
         )
-
-    # def setup(self, stage=None):
-    #     if stage in (None, "fit"):
-    #         w = (torch.tensor(self._init_class_weights,
-    #                           dtype=torch.float32,
-    #                           device=self.device)
-    #              if self._init_class_weights is not None else getattr(
-    #                  self.trainer.datamodule, "class_weights", None))
-    #         if w is not None and not torch.is_tensor(w):
-    #             w = torch.tensor(w, dtype=torch.float32, device=self.device)
-    #         print(f"Using class weights: {w} for semantic loss")
-    #         self.criterion = CrossEntropyDiceLoss(class_weights=w,
-    #                                               ignore_index=self.ignore_idx,
-    #                                               ce_weight=0.5,
-    #                                               dice_weight=0.5)
-    #     else:
-    # self.criterion = nn.CrossEntropyLoss(ignore_index=self.ignore_idx)
 
     def training_step(self, batch, batch_idx):
         imgs, targets = batch

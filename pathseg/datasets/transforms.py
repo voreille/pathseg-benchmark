@@ -7,7 +7,6 @@ from torchvision.transforms.v2 import functional as F
 
 
 class Transforms(nn.Module):
-
     def __init__(
         self,
         img_size: tuple[int, int],
@@ -41,9 +40,9 @@ class Transforms(nn.Module):
 
     def brightness(self, img):
         if torch.rand(()) < 0.5:
-            img = F.adjust_brightness(img,
-                                      brightness_factor=self.random_factor(
-                                          self.max_brightness_factor))
+            img = F.adjust_brightness(
+                img, brightness_factor=self.random_factor(self.max_brightness_factor)
+            )
 
         return img
 
@@ -60,8 +59,7 @@ class Transforms(nn.Module):
         if torch.rand(()) < 0.5:
             img = F.adjust_saturation(
                 img,
-                saturation_factor=self.random_factor(
-                    self.max_saturation_factor),
+                saturation_factor=self.random_factor(self.max_saturation_factor),
             )
 
         if torch.rand(()) < 0.5:
@@ -121,7 +119,6 @@ class Transforms(nn.Module):
 
 
 class CustomTransforms(nn.Module):
-
     def __init__(
         self,
         img_size: tuple[int, int],
@@ -141,6 +138,7 @@ class CustomTransforms(nn.Module):
         self.max_hue_delta = max_hue_delta / 360.0
 
         self.random_horizontal_flip = T.RandomHorizontalFlip()
+        self.random_vertical_flip = T.RandomVerticalFlip()
 
         self.scale_range = scale_range
 
@@ -151,9 +149,9 @@ class CustomTransforms(nn.Module):
 
     def brightness(self, img):
         if torch.rand(()) < 0.5:
-            img = F.adjust_brightness(img,
-                                      brightness_factor=self.random_factor(
-                                          self.max_brightness_factor))
+            img = F.adjust_brightness(
+                img, brightness_factor=self.random_factor(self.max_brightness_factor)
+            )
 
         return img
 
@@ -170,8 +168,7 @@ class CustomTransforms(nn.Module):
         if torch.rand(()) < 0.5:
             img = F.adjust_saturation(
                 img,
-                saturation_factor=self.random_factor(
-                    self.max_saturation_factor),
+                saturation_factor=self.random_factor(self.max_saturation_factor),
             )
 
         if torch.rand(()) < 0.5:
@@ -221,8 +218,6 @@ class CustomTransforms(nn.Module):
     def forward(self, img, target: dict):
         img = self.color_jitter(img)
 
-        img, target = self.random_horizontal_flip(img, target)
-
         c, h, w = img.shape
         # this change is to control the scale for varying input size with same magnification
         # similar results can be obtained by swapping the h and w, but find it less intuitive
@@ -241,12 +236,14 @@ class CustomTransforms(nn.Module):
 
         img, target = self.pad(img, target)
 
+        img, target = self.random_horizontal_flip(img, target)
+        img, target = self.random_vertical_flip(img, target)
+
         return self.crop(img, target)
 
 
 def _as_tuple(x) -> Tuple[int, int]:
-    return (int(x), int(x)) if isinstance(x, (int, float)) else (int(x[0]),
-                                                                 int(x[1]))
+    return (int(x), int(x)) if isinstance(x, (int, float)) else (int(x[0]), int(x[1]))
 
 
 def _next_multiple(n: int, k: int) -> int:
@@ -268,15 +265,15 @@ class CustomTransformsVaryingSize(nn.Module):
     """
 
     def __init__(
-            self,
-            img_size: tuple[int, int],
-            scale_range: tuple[float, float],
-            max_brightness_delta=32,
-            max_contrast_factor=0.5,
-            saturation_factor=0.5,
-            max_hue_delta=18,
-            disable_color_jitter: bool = False,
-            lcm_align: int = 224,  # LCM(14, 32)
+        self,
+        img_size: tuple[int, int],
+        scale_range: tuple[float, float],
+        max_brightness_delta=32,
+        max_contrast_factor=0.5,
+        saturation_factor=0.5,
+        max_hue_delta=18,
+        disable_color_jitter: bool = False,
+        lcm_align: int = 224,  # LCM(14, 32)
     ):
         super().__init__()
 
@@ -300,27 +297,27 @@ class CustomTransformsVaryingSize(nn.Module):
 
     def brightness(self, img: torch.Tensor) -> torch.Tensor:
         if torch.rand(()) < 0.5:
-            img = F.adjust_brightness(img,
-                                      brightness_factor=self.random_factor(
-                                          self.max_brightness_factor))
+            img = F.adjust_brightness(
+                img, brightness_factor=self.random_factor(self.max_brightness_factor)
+            )
         return img
 
     def contrast(self, img: torch.Tensor) -> torch.Tensor:
         if torch.rand(()) < 0.5:
-            img = F.adjust_contrast(img,
-                                    contrast_factor=self.random_factor(
-                                        self.max_contrast_factor))
+            img = F.adjust_contrast(
+                img, contrast_factor=self.random_factor(self.max_contrast_factor)
+            )
         return img
 
     def saturation_and_hue(self, img: torch.Tensor) -> torch.Tensor:
         if torch.rand(()) < 0.5:
-            img = F.adjust_saturation(img,
-                                      saturation_factor=self.random_factor(
-                                          self.max_saturation_factor))
+            img = F.adjust_saturation(
+                img, saturation_factor=self.random_factor(self.max_saturation_factor)
+            )
         if torch.rand(()) < 0.5:
-            img = F.adjust_hue(img,
-                               hue_factor=self.random_factor(
-                                   self.max_hue_delta, center=0.0))
+            img = F.adjust_hue(
+                img, hue_factor=self.random_factor(self.max_hue_delta, center=0.0)
+            )
         return img
 
     def color_jitter(self, img: torch.Tensor) -> torch.Tensor:
@@ -334,8 +331,9 @@ class CustomTransformsVaryingSize(nn.Module):
         return img
 
     # ---------- helpers ----------
-    def _crop_dims_down_to_max(self, img: torch.Tensor, target: dict,
-                               max_h: int, max_w: int):
+    def _crop_dims_down_to_max(
+        self, img: torch.Tensor, target: dict, max_h: int, max_w: int
+    ):
         """Randomly crop ONLY the dimensions that exceed (max_h, max_w)."""
         _, h, w = img.shape
         out_h = min(h, max_h)
@@ -343,19 +341,17 @@ class CustomTransformsVaryingSize(nn.Module):
         if out_h == h and out_w == w:
             return img, target
 
-        top = 0 if h == out_h else int(torch.randint(0, h - out_h + 1, (1, )))
-        left = 0 if w == out_w else int(torch.randint(0, w - out_w + 1, (1, )))
+        top = 0 if h == out_h else int(torch.randint(0, h - out_h + 1, (1,)))
+        left = 0 if w == out_w else int(torch.randint(0, w - out_w + 1, (1,)))
 
         img_c = F.crop(img, top=top, left=left, height=out_h, width=out_w)
 
         tgt_c = target
         if "masks" in target and target["masks"] is not None:
             tgt_c = dict(target)
-            tgt_c["masks"] = F.crop(target["masks"],
-                                    top=top,
-                                    left=left,
-                                    height=out_h,
-                                    width=out_w)
+            tgt_c["masks"] = F.crop(
+                target["masks"], top=top, left=left, height=out_h, width=out_w
+            )
         return img_c, tgt_c
 
     def _pad_to(self, img: torch.Tensor, target: dict, out_h: int, out_w: int):
@@ -373,12 +369,14 @@ class CustomTransformsVaryingSize(nn.Module):
             target["masks"] = F.pad(target["masks"], padding)
         return img, target
 
-    def _random_crop_to_non_empty(self,
-                                  img: torch.Tensor,
-                                  target: dict,
-                                  out_h: int,
-                                  out_w: int,
-                                  max_tries: int = 20):
+    def _random_crop_to_non_empty(
+        self,
+        img: torch.Tensor,
+        target: dict,
+        out_h: int,
+        out_w: int,
+        max_tries: int = 20,
+    ):
         """Random-crop to (out_h, out_w), preferring at least one non-empty mask."""
         rcrop = T.RandomCrop((out_h, out_w))
         for _ in range(max_tries):
@@ -436,14 +434,13 @@ class CustomTransformsVaryingSize(nn.Module):
 
 
 class AIGradingTransforms(nn.Module):
-
     def __init__(
         self,
         img_size: tuple[int, int],
         scale_range: tuple[float, float],
-        max_brightness_delta=32,   # kept for API compatibility, not used now
+        max_brightness_delta=32,  # kept for API compatibility, not used now
         max_contrast_factor=0.5,  # kept for API compatibility, not used now
-        saturation_factor=0.5,    # interpreted as +/- around 1.0
+        saturation_factor=0.5,  # interpreted as +/- around 1.0
         max_hue_delta=36,
         rotation_range_deg: float = 90.0,
         shift_range_frac: float = 0.2,
@@ -495,10 +492,14 @@ class AIGradingTransforms(nn.Module):
             max_sat = 1 + self.max_saturation_factor
         """
         # adjust hue
-        delta_hue = torch.empty(1).uniform_(
-            -self.max_hue_delta,
-            self.max_hue_delta,
-        ).item()
+        delta_hue = (
+            torch.empty(1)
+            .uniform_(
+                -self.max_hue_delta,
+                self.max_hue_delta,
+            )
+            .item()
+        )
         img = F.adjust_hue(img, delta_hue)
 
         # adjust saturation
@@ -548,7 +549,6 @@ class AIGradingTransforms(nn.Module):
         img = self.random_saturation_and_hue_tf(img)
 
         img, target = self.random_horizontal_flip(img, target)
-
 
         c, h, w = img.shape
         target_size = max(h, w)

@@ -92,7 +92,7 @@ class LightningModule(lightning.LightningModule):
         output = self.network(x)
 
         if not self.training and isinstance(output, tuple):
-            return (y[-1] for y in self.network(x))
+            return (y[-1] for y in output)
 
         return output
 

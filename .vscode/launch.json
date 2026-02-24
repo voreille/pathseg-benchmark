@@ -84,6 +84,48 @@
             "justMyCode": false
         },
         {
+            "name": "Python: main.py fit ANORAK Mask2Former",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/anorak_mask2former.yaml",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Python: main.py fit ANORAK Concept",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/anorak_concept_semantic.yaml",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Python: main.py fit IGNITE Linear Semantic",
             "type": "debugpy",
             "request": "launch",
