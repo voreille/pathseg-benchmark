@@ -14,11 +14,12 @@ trainer:
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
-  class_path: pathseg.training.concept_semantic.ConceptQuerySemanticModule
+  # class_path: pathseg.training.concept_semantic.ConceptQuerySemanticModule
+  class_path: pathseg.training.concept_semantic.PrimitiveBankSemanticModule
   init_args:
     freeze_encoder: True
     network:
-      class_path: pathseg.models.concept_query_decoder.ConceptQuerySemanticDecoder
+      class_path: pathseg.models.concept_query_decoder.PrimitiveBankSemanticDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:

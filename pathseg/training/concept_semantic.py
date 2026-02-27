@@ -263,3 +263,228 @@ class ConceptQuerySemanticModule(LightningModule):
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
+
+
+class PrimitiveBankSemanticModule(LightningModule):
+    """
+    LightningModule for PrimitiveBankSemanticDecoder (single dataset).
+
+    Supports:
+      - Standard CE loss
+      - Primitive usage entropy (anti-collapse)
+      - Optional assignment entropy (sharpen primitives)
+      - Prototype diversity regularization
+    """
+
+    def __init__(
+        self,
+        network: nn.Module,
+        num_metrics: int,
+        num_classes: int,
+        ignore_idx: int,
+        img_size: tuple[int, int],
+        lr: float = 1e-4,
+        weight_decay: float = 0.05,
+        poly_lr_decay_power: float = 0.9,
+        lr_multiplier_encoder: float = 0.1,
+        freeze_encoder: bool = False,
+        tiler: Optional[Tiler] = None,
+        class_weights: Optional[Sequence[float]] = None,
+        # ---- Primitive regularization ----
+        anti_collapse: bool = True,
+        lambda_usage: float = 1e-2,
+        lambda_assignment_entropy: float = 1e-3,
+        lambda_diversity: float = 1e-3,
+        active_area_threshold: float = 0.02,
+    ):
+        super().__init__(
+            img_size=img_size,
+            freeze_encoder=freeze_encoder,
+            network=network,
+            weight_decay=weight_decay,
+            lr=lr,
+            lr_multiplier_encoder=lr_multiplier_encoder,
+            tiler=tiler,
+        )
+
+        self.save_hyperparameters(ignore=["network"])
+
+        self.ignore_idx = ignore_idx
+        self.poly_lr_decay_power = poly_lr_decay_power
+
+        # Metrics
+        self.init_metrics_semantic(num_classes, ignore_idx, num_metrics)
+
+        weight_tensor = None
+        if class_weights is not None:
+            weight_tensor = torch.tensor(class_weights, dtype=torch.float32)
+
+        self.criterion = nn.CrossEntropyLoss(
+            ignore_index=ignore_idx,
+            weight=weight_tensor,
+        )
+
+        # Regularization
+        self.anti_collapse = anti_collapse
+        self.lambda_usage = lambda_usage
+        self.lambda_assignment_entropy = lambda_assignment_entropy
+        self.lambda_diversity = lambda_diversity
+        self.active_area_threshold = active_area_threshold
+
+    # =========================================================
+    # Primitive Regularization
+    # =========================================================
+    def _compute_primitive_regularization(self, out: dict, targets: torch.Tensor):
+        if not self.anti_collapse:
+            return torch.tensor(0.0, device=targets.device), {}
+
+        primitive_probs = out["primitive_probs"]  # (B,K,H,W)
+        B, K, H, W = primitive_probs.shape
+
+        primitive_probs = F.interpolate(
+            primitive_probs, self.img_size, mode="bilinear", align_corners=False
+        )
+
+        valid = (targets != self.ignore_idx).float()  # (B,H,W)
+        if valid.sum() == 0:
+            return torch.tensor(0.0, device=targets.device), {}
+
+        valid4 = valid[:, None, :, :]
+
+        # -------------------------
+        # 1) Usage entropy (global)
+        # -------------------------
+        area = (primitive_probs * valid4).sum((-2, -1)) / (
+            valid4.sum((-2, -1)) + 1e-6
+        )  # (B,K)
+
+        p = area / (area.sum(dim=1, keepdim=True) + 1e-6)
+        usage_entropy = -(p * torch.log(p + 1e-8)).sum(dim=1).mean()
+
+        loss_usage = -usage_entropy
+
+        # -------------------------
+        # 2) Per-pixel assignment entropy
+        # -------------------------
+        loss_assign = torch.tensor(0.0, device=targets.device)
+        assign_entropy = torch.tensor(0.0, device=targets.device)
+
+        if self.lambda_assignment_entropy > 0:
+            entropy_map = -(primitive_probs * torch.log(primitive_probs + 1e-8)).sum(
+                dim=1
+            )
+            assign_entropy = (entropy_map * valid).sum() / (valid.sum() + 1e-6)
+            loss_assign = assign_entropy  # minimize entropy
+
+        # -------------------------
+        # 3) Prototype diversity (orthogonality)
+        # -------------------------
+        loss_div = torch.tensor(0.0, device=targets.device)
+
+        if self.lambda_diversity > 0:
+            P = self.network.primitive_prototypes  # (K,D)
+            P = F.normalize(P, dim=1)
+            sim = torch.matmul(P, P.t())  # (K,K)
+            identity = torch.eye(K, device=sim.device)
+            loss_div = ((sim - identity) ** 2).mean()
+
+        loss_reg = (
+            self.lambda_usage * loss_usage
+            + self.lambda_assignment_entropy * loss_assign
+            + self.lambda_diversity * loss_div
+        )
+
+        stats = {
+            "primitive_usage_entropy": usage_entropy.detach(),
+            "primitive_assignment_entropy": assign_entropy.detach(),
+        }
+
+        return loss_reg, stats
+
+    # =========================================================
+    # Training
+    # =========================================================
+    def training_step(self, batch, batch_idx):
+        imgs, targets = batch
+
+        out = self(imgs)
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+        targets_pp = torch.stack(targets_pp).long()
+
+        logits = F.interpolate(
+            out["semantic_logits"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        loss_ce = self.criterion(logits, targets_pp)
+
+        loss_reg, stats = self._compute_primitive_regularization(out, targets_pp)
+
+        loss_total = loss_ce + loss_reg
+
+        self.log("train_loss", loss_total, prog_bar=True, sync_dist=True)
+        self.log("train_loss_ce", loss_ce, sync_dist=True)
+
+        if self.anti_collapse:
+            self.log("train_loss_reg", loss_reg, sync_dist=True)
+            for k, v in stats.items():
+                self.log(f"train_{k}", v, sync_dist=True)
+
+        return loss_total
+
+    # =========================================================
+    # Validation (same structure as before)
+    # =========================================================
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        dataloader_idx=None,
+        log_prefix=None,
+        is_notebook=False,
+    ):
+        imgs, targets = batch
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        out_crop = self(crops)
+
+        crop_logits = F.interpolate(
+            out_crop["semantic_logits"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
+
+        if is_notebook:
+            return logits
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        self.update_metrics(logits, targets_pp, dataloader_idx)
+
+        if batch_idx == 0:
+            name = f"{log_prefix}_{dataloader_idx}_pred_{batch_idx}"
+            plot = self.plot_semantic(imgs[0], targets_pp[0], logits=logits[0])
+            self.log_wandb_image(name, plot, commit=False)
+
+    def on_validation_epoch_end(self):
+        self._on_eval_epoch_end_semantic("val")
+
+    def configure_optimizers(self):
+        optimizer = super().configure_optimizers()
+
+        lr_scheduler = {
+            "scheduler": PolynomialLR(
+                optimizer,
+                int(self.trainer.estimated_stepping_batches),
+                self.poly_lr_decay_power,
+            ),
+            "interval": "step",
+        }
+
+        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}

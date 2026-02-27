@@ -209,38 +209,36 @@ class ConceptQuerySemanticDecoder(Encoder):
         return out
 
 
-class ConceptQuerySemanticDecoderChatGPT(Encoder):
+class PrimitiveBankSemanticDecoder(Encoder):
     """
-    Semantic segmentation via a bank of learnable "concept queries".
+    Option 1: Pixel-driven mixture of global primitive prototypes + dataset-specific mapping.
 
-    Always returns a dict with stable keys:
-      - "semantic_logits": (B, C, H, W) final semantic logits (for CE)
-      - "concept_mask_logits": (B, K, H, W) final concept mask logits
-      - "concept_class_logits": (B, K, C) final per-concept class logits
+    - Encoder is your ViT Encoder superclass that returns tokens: (B, N, Denc)
+    - We project tokens -> per-pixel embeddings (B, D, H', W') using the same grid_size logic.
+    - A global bank of K primitive prototypes P_k in embedding space (K, D).
+    - Per-pixel assignment weights over primitives:
+        a[b,k,h,w] = softmax_k( <e[b,:,h,w], P_k> / tau )
+    - Dataset-specific class logits:
+        logits[b,c,h,w] = sum_k W_d[c,k] * a[b,k,h,w] + b_d[c]
 
-    Optionally (if enabled) also returns:
-      - "semantic_logits_per_layer": list[(B, C, H, W)]
-      - "concept_mask_logits_per_layer": list[(B, K, H, W)]
-      - "concept_class_logits_per_layer": list[(B, K, C)]
-
-    Composition (MaskFormer-style):
-        P(class=c | x,y) = sum_k softmax(class_logits)[k,c] * sigmoid(mask_logits)[k,x,y]
-    then semantic_logits = log(P) for CE training.
+    Outputs:
+      - "semantic_logits": (B, C_d, H', W') for the chosen dataset head
+      - "primitive_logits": (B, K, H', W') similarity scores before softmax (useful for XAI)
+      - "primitive_probs": (B, K, H', W') assignment weights a
+      - "pixel_embeddings": (B, D, H', W')
     """
 
     def __init__(
         self,
         img_size,
-        num_classes: int,
         encoder_id,
-        sub_norm: bool = False,
-        num_concepts: int = 64,
-        num_attn_heads: int = 8,
-        num_blocks: int = 6,
-        concept_dim: int = 256,
+        num_classes: int,
         ckpt_path: str = "",
-        class_temperature: float = 1.0,
-        return_per_layer: bool = False,  # deep supervision / diagnostics
+        sub_norm: bool = False,
+        primitive_dim: int = 256,  # D
+        num_primitives: int = 128,  # K
+        temperature: float = 1.0,  # tau
+        normalize_embeddings: bool = True,
     ):
         super().__init__(
             img_size=img_size,
@@ -249,143 +247,103 @@ class ConceptQuerySemanticDecoderChatGPT(Encoder):
             ckpt_path=ckpt_path,
         )
 
-        if num_classes < 2:
-            raise ValueError("num_classes must be >= 2 for semantic segmentation.")
+        self.num_primitives = num_primitives
+        self.primitive_dim = primitive_dim
+        self.temperature = float(temperature)
+        self.normalize_embeddings = bool(normalize_embeddings)
 
-        self.num_classes = num_classes
-        self.num_concepts = num_concepts
-        self.class_temperature = float(class_temperature)
-        self.return_per_layer = bool(return_per_layer)
+        # project encoder token dim -> primitive_dim (pixel embedding dim)
+        self.token_proj = nn.Linear(self.embed_dim, primitive_dim)
 
-        # project encoder token dim -> concept_dim
-        self.proj = nn.Linear(self.embed_dim, concept_dim)
-
-        # 2D sine pos-emb for spatial tokens (keys)
-        self.k_pos = Mask2FormerSinePositionEmbedding(
-            num_pos_feats=concept_dim // 2,
-            normalize=True,
+        # global primitive prototypes P: (K, D)
+        self.primitive_prototypes = nn.Parameter(
+            torch.empty(num_primitives, primitive_dim)
         )
+        nn.init.trunc_normal_(self.primitive_prototypes, std=0.02)
 
-        # concept queries + query-slot identity embeddings
-        self.q = nn.Embedding(num_concepts, concept_dim)
-        self.q_pos = nn.Embedding(num_concepts, concept_dim)
+        # dataset-specific primitive->class mappings
+        # W_d: (C_d, K), b_d: (C_d,)
 
-        self.decoder = nn.ModuleList(
-            [DecoderBlock(concept_dim, num_attn_heads) for _ in range(num_blocks)]
-        )
+        self.head = nn.Linear(num_primitives, num_classes, bias=True)
 
-        self.q_norm = nn.LayerNorm(concept_dim)
+        # optional: encourage sparse class usage by initializing small weights
+        nn.init.trunc_normal_(self.head.weight, std=0.02)
+        nn.init.zeros_(self.head.bias)
 
-        self.q_to_mask = Mask2FormerMLPPredictionHead(
-            concept_dim, concept_dim, concept_dim
-        )
-        self.q_to_class = nn.Linear(concept_dim, num_classes)
-
-    @staticmethod
-    def _safe_log(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        return torch.log(x.clamp(min=eps, max=1.0 - eps))
-
-    def enable_deep_supervision(self):
-        self.return_per_layer = True
-
-    def _concept_mask_logits(
-        self, q_tokens: torch.Tensor, x_map: torch.Tensor
-    ) -> torch.Tensor:
+    def _tokens_to_feature_map(self, tokens: torch.Tensor) -> torch.Tensor:
         """
-        q_tokens: (K, B, C)
-        x_map:    (B, C, H, W)
-        returns:  (B, K, H, W)
+        tokens: (B, N, D)
+        returns feature_map: (B, D, H', W') with H'*W' == N (as in your existing grid_size logic)
         """
-        q_feats = self.q_to_mask(self.q_norm(q_tokens)).permute(1, 0, 2)  # (B,K,C)
-
-        B, K, C = q_feats.shape
-        Bx, Cx, H, W = x_map.shape
-        if B != Bx or C != Cx:
+        B, N, D = tokens.shape
+        H, W = self.grid_size  # inherited from Encoder
+        if H * W != N:
             raise RuntimeError(
-                f"shape mismatch: q_feats={(B, K, C)} vs x_map={(Bx, Cx, H, W)}"
+                f"Token count N={N} does not match grid_size {self.grid_size} (H*W={H * W})."
             )
+        # (B, N, D) -> (B, D, H, W)
+        return tokens.transpose(1, 2).reshape(B, D, H, W)
 
-        x_flat = x_map.reshape(B, C, H * W)  # (B,C,HW)
-        masks_flat = torch.bmm(q_feats, x_flat)  # (B,K,HW)
-        return masks_flat.view(B, K, H, W)
+    def _compute_primitive_logits(self, pixel_embeddings: torch.Tensor) -> torch.Tensor:
+        """
+        pixel_embeddings: (B, D, H, W)
+        returns primitive_logits: (B, K, H, W) where logits are dot(e, Pk)/tau
+        """
+        B, D, H, W = pixel_embeddings.shape
+        P = self.primitive_prototypes  # (K, D)
 
-    def _concept_class_logits(self, q_tokens: torch.Tensor) -> torch.Tensor:
-        """
-        q_tokens: (K,B,C)
-        returns:  (B,K,num_classes)
-        """
-        logits = self.q_to_class(self.q_norm(q_tokens)).transpose(0, 1)  # (B,K,C)
-        if self.class_temperature != 1.0:
-            logits = logits / self.class_temperature
-        return logits
+        e = pixel_embeddings
+        if self.normalize_embeddings:
+            e = F.normalize(e, dim=1)
+            Pn = F.normalize(P, dim=1)
+        else:
+            Pn = P
 
-    def _semantic_logits(
-        self, concept_mask_logits: torch.Tensor, concept_class_logits: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        concept_mask_logits:  (B,K,H,W)
-        concept_class_logits: (B,K,C)
-        returns:              (B,C,H,W) semantic logits for CE
-        """
-        mask_probs = torch.sigmoid(concept_mask_logits)  # (B,K,H,W)
-        class_probs = F.softmax(concept_class_logits, dim=-1)  # (B,K,C)
-        semantic_probs = torch.einsum("bkc,bkhw->bchw", class_probs, mask_probs)
-        return self._safe_log(semantic_probs)
+        # Compute dot products: (B, D, H, W) with (K, D)
+        # Use einsum: bdhw,kd -> bkhw
+        primitive_logits = torch.einsum("bdhw,kd->bkhw", e, Pn) / max(
+            self.temperature, 1e-6
+        )
+        return primitive_logits
 
     def forward(self, x: torch.Tensor) -> dict:
-        tokens = super().forward(x)  # (B,N,embed_dim)
-        tokens = self.proj(tokens)  # (B,N,concept_dim)
+        """
+        dataset: key from datasets dict passed at init, selects which class head to use.
+        """
 
-        B, N, C = tokens.shape
+        # ViT encoder tokens: (B, N, Denc)
+        tokens = super().forward(x)
 
-        # (K,B,C)
-        q = self.q.weight[:, None, :].expand(-1, B, -1)
+        # Project to primitive embedding dim: (B, N, D)
+        tokens = self.token_proj(tokens)
 
-        # (N,B,C)
-        v = tokens.transpose(0, 1)
+        # Per-pixel embedding map: (B, D, H', W')
+        pixel_embeddings = self._tokens_to_feature_map(tokens)
 
-        # (B,C,H,W)
-        x_map = tokens.transpose(1, 2).reshape(B, C, *self.grid_size)
+        # Primitive similarity logits: (B, K, H', W')
+        primitive_logits = self._compute_primitive_logits(pixel_embeddings)
 
-        # (N,B,C)
-        k = v + self.k_pos(x_map).flatten(2).permute(2, 0, 1)
+        # Primitive assignment weights: (B, K, H', W')
+        primitive_probs = F.softmax(primitive_logits, dim=1)
 
-        # (K,B,C)
-        q_pos = self.q_pos.weight[:, None, :].expand(-1, B, -1)
+        # Dataset-specific class logits from primitive mixture:
+        # For each pixel, we have a K-dim vector primitive_probs[:, :, h, w]
+        # Apply linear head over K: head takes (B, K, H, W) -> (B, C, H, W)
+        head = self.head
+        # reshape to apply nn.Linear over K:
+        B, K, H, W = primitive_logits.shape
+        logits_flat = primitive_logits.permute(0, 2, 3, 1).reshape(
+            B * H * W, K
+        )  # (BHW, K)
+        logits_flat = head(logits_flat)  # (BHW, C)
+        C = logits_flat.shape[-1]
+        semantic_logits = logits_flat.view(B, H, W, C).permute(
+            0, 3, 1, 2
+        )  # (B, C, H, W)
 
-        # optional per-layer collectors
-        sem_layers = []
-        m_layers = []
-        c_layers = []
-
-        for block in self.decoder:
-            m = self._concept_mask_logits(q, x_map)  # (B,K,H,W)
-            c_logits = self._concept_class_logits(q)  # (B,K,C)
-            sem = self._semantic_logits(m, c_logits)  # (B,C,H,W)
-
-            if self.return_per_layer:
-                sem_layers.append(sem)
-                m_layers.append(m)
-                c_layers.append(c_logits)
-
-            q = block(q, k, v, q_pos)
-
-        # final outputs
-        concept_mask_logits = self._concept_mask_logits(q, x_map)
-        concept_class_logits = self._concept_class_logits(q)
-        semantic_logits = self._semantic_logits(
-            concept_mask_logits, concept_class_logits
-        )
-
-        out = {
-            "semantic_logits": semantic_logits,  # (B,C,H,W)
-            "concept_mask_logits": concept_mask_logits,  # (B,K,H,W)
-            "concept_class_logits": concept_class_logits,  # (B,K,C)
+        return {
+            "semantic_logits": semantic_logits,  # (B, C_d, H', W')
+            "primitive_logits": primitive_logits,  # (B, K, H', W')
+            "primitive_probs": primitive_probs,  # (B, K, H', W')
+            "pixel_embeddings": pixel_embeddings,  # (B, D, H', W')
         }
-
-        if self.return_per_layer:
-            out["semantic_logits_per_layer"] = sem_layers
-            out["concept_mask_logits_per_layer"] = m_layers
-            out["concept_class_logits_per_layer"] = c_layers
-
-        return out

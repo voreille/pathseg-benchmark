@@ -81,7 +81,7 @@ class Mask2formerDecoder(Encoder):
         x_flat = x.reshape(B, C, H * W)
 
         # batched matmul: (B, Q, C) @ (B, C, HW) -> (B, Q, HW)
-        masks_flat = torch.bmm(q_feats, x_flat)
+        masks_flat = torch.bmm(q_feats, x_flat) / (C ** 0.5)  # optional scaling
 
         # reshape back to (B, Q, H, W)
         return masks_flat.view(B, Q, H, W)
@@ -97,7 +97,7 @@ class Mask2formerDecoder(Encoder):
 
         mask_logits = self._compute_mask_logits(q_intermediate, x)
 
-        attn_mask = (mask_logits < 0).bool().flatten(-2)
+        attn_mask = (mask_logits.detach() < 0).bool().flatten(-2)
         attn_mask[torch.where(attn_mask.sum(-1) == attn_mask.shape[-1])] = False
 
         return attn_mask, mask_logits, class_logits

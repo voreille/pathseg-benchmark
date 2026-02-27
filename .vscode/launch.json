@@ -63,6 +63,28 @@
             },
         },
         {
+            "name": "Python: main.py fit ANORAK+IGNITE MultiTask Semantic",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/anorak_ignite_multitask.yaml",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+ 
+        {
             "name": "Python: main.py fit ANORAK Linear Semantic",
             "type": "debugpy",
             "request": "launch",
@@ -167,5 +189,35 @@
             },
             "justMyCode": false
         },
+        {
+            "name": "WSI Stitch CellOMaps",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pathseg/wsi_eval/compute_slide_pred.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--tiles-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/tiles",
+                "--slides-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/slides",
+                "--output-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/predictions/test",
+                "--checkpoint-path",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/gppdyjhi/epoch=35-step=40000.ckpt",
+                "--model-config",
+                "/home/valentin/workspaces/pathseg-benchmark/configs/anorak_linear_semantic.yaml",
+                "--metadata-csv",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/cellomaps_metadata.csv",
+                "--batch-size",
+                "8",
+                "--gpu-id",
+                "1",
+                "--save-argmax-png"
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        }
     ]
 }
