@@ -83,7 +83,6 @@
             },
             "justMyCode": false
         },
- 
         {
             "name": "Python: main.py fit ANORAK Linear Semantic",
             "type": "debugpy",
@@ -101,6 +100,26 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
                 "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+                {
+            "name": "Python: main.py predict ANORAK for viz",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "predict",
+                "-c",
+                "configs/anorak_linear_semantic_viz.yaml",
+                "--no_compile",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false
@@ -198,19 +217,17 @@
             "justMyCode": false,
             "args": [
                 "--tiles-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/tiles",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/tiles",
                 "--slides-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/slides",
+                "/mnt/nas7/data/Personal/Valentin/DartmouthLungCancerHistologyDataset/DHMC_LUAD_corrected",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/predictions/test",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/predictions",
                 "--checkpoint-path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/gppdyjhi/epoch=35-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/n5dunhn8/epoch=2-step=4000_test.ckpt",
                 "--model-config",
-                "/home/valentin/workspaces/pathseg-benchmark/configs/anorak_linear_semantic.yaml",
-                "--metadata-csv",
-                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/cellomaps/cellomaps_metadata.csv",
+                "/home/valentin/workspaces/pathseg-benchmark/configs/anorak_ignite_multitask.yaml",
                 "--batch-size",
-                "8",
+                "16",
                 "--gpu-id",
                 "1",
                 "--save-argmax-png"
