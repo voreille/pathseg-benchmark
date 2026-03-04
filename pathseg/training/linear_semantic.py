@@ -25,6 +25,7 @@ class LinearSemantic(LightningModule):
         freeze_encoder: bool = False,
         tiler: Optional[Tiler] = None,
         class_weights: Optional[list] = None,
+        interpolate_logits: bool = True,
     ):
         super().__init__(
             img_size=img_size,
@@ -36,6 +37,7 @@ class LinearSemantic(LightningModule):
             tiler=tiler,
         )
 
+        self.interpolate_logits = interpolate_logits
         self.save_hyperparameters(ignore=["network"])
 
         self.ignore_idx = ignore_idx
@@ -55,7 +57,8 @@ class LinearSemantic(LightningModule):
         imgs, targets = batch
 
         logits = self(imgs)
-        logits = F.interpolate(logits, self.img_size, mode="bilinear")
+        if self.interpolate_logits:
+            logits = F.interpolate(logits, self.img_size, mode="bilinear")
 
         targets = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
         targets = torch.stack(targets).long()
@@ -77,7 +80,8 @@ class LinearSemantic(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        if self.interpolate_logits:
+            crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
         logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
 
         if is_notebook:
@@ -118,7 +122,8 @@ class LinearSemantic(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops)
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        if self.interpolate_logits:
+            crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
         logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
 
         targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)

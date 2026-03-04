@@ -10,15 +10,16 @@ trainer:
       project: "pathseg-benchmark"
       group: ANORAK
       job_type: baseline
-      tags: ["baseline", "wahoo", "20x", "896x896", "ANORAK", "Linear"]
+      tags: ["baseline", "wahoo", "20x", "896x896", "ANORAK", "ConvDecoder"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
   class_path: pathseg.training.linear_semantic.LinearSemantic
   init_args:
     freeze_encoder: False
+    interpolate_logits: False
     network:
-      class_path: pathseg.models.linear_decoder.LinearDecoder
+      class_path: pathseg.models.conv_decoder.ConvDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:
@@ -32,7 +33,7 @@ model:
 data:
   class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_20x
+    root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0

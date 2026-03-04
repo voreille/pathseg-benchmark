@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Optional, Tuple, Union
+from typing import List, Literal, Optional, Tuple, Union
 
 import pandas as pd
 import torch
@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset as TorchDataset
 
-from pathseg.datasets.dataset import Dataset
+from pathseg.datasets.dataset import Dataset, InstanceDataset
 from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.datasets.transforms import CustomTransforms
 from pathseg.datasets.utils import RepeatDataset
@@ -188,9 +188,10 @@ class ANORAK(LightningDataModule):
         transforms: Optional[nn.Module] = None,
         epoch_repeat: int = 1,
         # Predict controls (kept minimal)
-        predict_split: Literal["val", "test", "val+test"] = "test",
+        predict_split: Literal["val", "test", "val+test"] = "val",
         predict_crop_size: Optional[tuple[int, int]] = None,  # fixed-size crops for viz
         predict_grid_n: int = 2,  # default grid crops per image = 4
+        target_format: Literal["mask2former", "semantic"] = "semantic",
     ) -> None:
         super().__init__(
             root=root,
@@ -205,13 +206,18 @@ class ANORAK(LightningDataModule):
 
         root_dir = Path(root)
         self.fold = fold
+        self.target_format = target_format
         rank_zero_info(f"[ANORAK] fold={self.fold}, batch_size={batch_size}")
 
         self.images_dir = root_dir / "images"
-        self.masks_dir = root_dir / "masks_semantic"
+        if self.target_format == "mask2former":
+            self.masks_dir = root_dir / "targets_instance"
+            self.DatasetClass = InstanceDataset
+        else:
+            self.masks_dir = root_dir / "masks_semantic"
+            self.DatasetClass = Dataset
 
-        split_df = pd.read_csv(root_dir / "split_df.csv")
-        self.split_df = split_df[split_df["fold"] == fold]
+        self.split_df = pd.read_csv(root_dir / "split.csv")
 
         self.epoch_repeat = epoch_repeat
 
@@ -224,17 +230,25 @@ class ANORAK(LightningDataModule):
             img_size=img_size, scale_range=scale_range
         )
 
-    def _get_split_ids(self):
+    def _get_split_ids(
+        self,
+        df: pd.DataFrame,
+        fold: int = 0,
+    ) -> Tuple[List[str], List[str], List[str]]:
+        m_test = df["split"] == "test"
+        m_val = df["validation_fold"] == "fold" + str(fold)
+        m_train = (df["split"] == "train") & (~m_val)
+
         return (
-            self.split_df[self.split_df["is_train"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_val"]]["image_id"].unique().tolist(),
-            self.split_df[self.split_df["is_test"]]["image_id"].unique().tolist(),
+            df[m_train]["sample_id"].tolist(),
+            df[m_val]["sample_id"].tolist(),
+            df[m_test]["sample_id"].tolist(),
         )
 
     def compute_class_weights(self):
         from pathseg.datasets.stats import compute_class_weights_from_ids
 
-        train_ids, _, _ = self._get_split_ids()
+        train_ids, _, _ = self._get_split_ids(self.split_df, self.fold)
         return compute_class_weights_from_ids(
             train_ids,
             self.masks_dir,
@@ -243,18 +257,22 @@ class ANORAK(LightningDataModule):
         )
 
     def setup(self, stage: Union[str, None] = None) -> LightningDataModule:
-        train_ids, val_ids, test_ids = self._get_split_ids()
+        train_ids, val_ids, test_ids = self._get_split_ids(self.split_df, self.fold)
 
         if stage in ("fit", "validate", None):
-            self.train_dataset = Dataset(
+            self.train_dataset = self.DatasetClass(
                 train_ids, self.images_dir, self.masks_dir, transforms=self.transforms
             )
             # deterministic val: no random-scale/crop transforms
-            self.val_dataset = Dataset(val_ids, self.images_dir, self.masks_dir)
-            self.class_weights = self.compute_class_weights()
+            self.val_dataset = self.DatasetClass(
+                val_ids, self.images_dir, self.masks_dir
+            )
+            # self.class_weights = self.compute_class_weights()
 
         if stage in ("test", None):
-            self.test_dataset = Dataset(test_ids, self.images_dir, self.masks_dir)
+            self.test_dataset = self.DatasetClass(
+                test_ids, self.images_dir, self.masks_dir
+            )
 
         if stage in ("predict", None):
             ids = []
@@ -264,7 +282,7 @@ class ANORAK(LightningDataModule):
                 ids += test_ids
 
             # base predict dataset: full image + GT + image_id, no transforms (clean viz)
-            self.predict_base = Dataset(
+            self.predict_base = self.DatasetClass(
                 ids,
                 self.images_dir,
                 self.masks_dir,

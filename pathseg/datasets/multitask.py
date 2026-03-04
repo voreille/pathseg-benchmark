@@ -287,19 +287,19 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     masks_dir=masks_dir,
                     stage="predict",
                 )
-                base_test_p = self._make_base_dataset(
-                    ids=test_ids,
-                    images_dir=images_dir,
-                    masks_dir=masks_dir,
-                    stage="predict",
-                )
+                # base_test_p = self._make_base_dataset(
+                #     ids=test_ids,
+                #     images_dir=images_dir,
+                #     masks_dir=masks_dir,
+                #     stage="predict",
+                # )
 
                 self.predict_wrapped.append(
                     (f"{name}_val", WrapWithSource(base_val_p, source_id=source_id))
                 )
-                self.predict_wrapped.append(
-                    (f"{name}_test", WrapWithSource(base_test_p, source_id=source_id))
-                )
+                # self.predict_wrapped.append(
+                #     (f"{name}_test", WrapWithSource(base_test_p, source_id=source_id))
+                # )
 
         if stage in ("fit", "validate", None):
             self.train_dataset = ConcatDataset(train_wrapped)

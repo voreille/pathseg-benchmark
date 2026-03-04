@@ -21,7 +21,7 @@ model:
     source_id_b: 1
     num_metrics: 2
     network:
-      class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
+      class_path: pathseg.models.multitask_decoder.ConditionalLinearDecoder
       init_args:
         encoder_id: "h0-mini"
         num_classes_a: 16

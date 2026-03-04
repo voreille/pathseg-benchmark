@@ -1,24 +1,26 @@
 trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
-  val_check_interval: 1000
-  check_val_every_n_epoch: null
+  val_check_interval: ~
+  check_val_every_n_epoch: 1
   accumulate_grad_batches: 1
-  logger:
-    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+  logger: null
+  callbacks:
+  - class_path: pathseg.training.callbacks.save_seg_viz.SaveSegVizCallback
     init_args:
-      project: "pathseg-benchmark"
-      group: ANORAK
-      job_type: baseline
-      tags: ["baseline", "wahoo", "20x", "896x896", "ANORAK", "Linear"]
-      save_dir: ./wandb
-      log_model: false # avoid artifact uploads in debug
+      out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/semantic_linear_896_h0-mini_fold-0
+      num_classes: 7           # <-- set this
+      dpi: 200
+      write_csv: true
+      save_pred_mask: false
+      show_iou_per_class: true
+      iou_present_only: true
 model:
-  class_path: pathseg.training.linear_semantic.LinearSemantic
+  class_path: pathseg.training.mask2former_semantic.Mask2formerSemantic
   init_args:
     freeze_encoder: False
     network:
-      class_path: pathseg.models.linear_decoder.LinearDecoder
+      class_path: pathseg.models.mask2former_decoder.Mask2formerDecoder
       init_args:
         encoder_id: "h0-mini"
     tiler:
@@ -32,7 +34,9 @@ model:
 data:
   class_path: pathseg.datasets.anorak.ANORAK
   init_args:
-    root: /home/valentin/workspaces/pathseg-benchmark/data/ANORAK_20x
+    root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
+    target_format: mask2former
+    num_classes: 7
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0

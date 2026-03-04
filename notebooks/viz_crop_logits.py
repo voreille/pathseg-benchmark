@@ -1,5 +1,4 @@
 # %%
-import math
 import os
 
 import matplotlib.pyplot as plt
@@ -7,7 +6,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from matplotlib.colors import ListedColormap
-from matplotlib.patches import Patch
 
 from pathseg.utils.load_experiment import load_experiment
 
@@ -27,8 +25,8 @@ num_classes = 7
 cmap = _make_discrete_cmap(num_classes=num_classes)
 
 # %%
-config_path = "/home/valentin/workspaces/pathseg-benchmark/configs/anorak_linear_semantic_viz.yaml"
-checkpoint_path = "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/nrdl7fgd/epoch=35-step=40000.ckpt"
+config_path = "/home/valentin/workspaces/pathseg-benchmark/configs/anorak_ignite_multitask_viz.yaml"
+checkpoint_path = "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/n5dunhn8/epoch=26-step=40000.ckpt"
 
 bundle = load_experiment(
     config_path=config_path,
@@ -45,27 +43,33 @@ bundle = load_experiment(
 dm = bundle["datamodule"]
 model = bundle["model"]
 model.eval()
+# %%
+dm.predict_splits
 
 # %%
-data_loader = dm.predict_dataloader()
+data_loader = dm.predict_dataloader()[1]
+# %%
 
 for batch_idx, batch in enumerate(data_loader):
-    imgs, targets_raw, img_ids = batch
-    if img_ids[0] != "train221_Da454":
+    # imgs, targets_raw, img_ids = batch
+    imgs, targets, source_ids, image_ids = batch
+    if image_ids[0] != "train221_Da454":
         continue
     crops, origins, img_sizes = model.window_imgs_semantic(imgs)
     crops = crops.to(device)
     with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
         crop_logits = model(crops)
+    if isinstance(crop_logits, dict):
+        crop_logits = crop_logits["logits_b"] 
     crop_logits = F.interpolate(crop_logits, model.img_size, mode="bilinear")
+
+    crops = crops.cpu()
+    crop_logits = crop_logits.cpu()
     break
 
 device = next(model.parameters()).device
 
 
-# %%
-crops = crops.cpu()
-crop_logits = crop_logits.cpu()
 
 # %%
 n_crops = len(crops)
@@ -96,6 +100,13 @@ for crop_idx, crop in enumerate(crops):
 plt.tight_layout()
 plt.show()
 # %%
-crops.shape
-
+# plot color mapping
+plt.figure(figsize=(6, 1))
+plt.imshow(
+    np.arange(num_classes).reshape(1, -1),
+    cmap=cmap,
+    vmin=-0.5,
+    vmax=num_classes - 0.5,
+    aspect="auto",
+)
 # %%

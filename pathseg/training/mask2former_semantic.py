@@ -1,5 +1,6 @@
 from typing import Optional
 
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
@@ -17,7 +18,7 @@ class Mask2formerSemantic(LightningModule):
         img_size: tuple[int, int],
         num_metrics: int,
         num_classes: int,
-        ignore_idx: int=255,
+        ignore_idx: int = 255,
         lr: float = 1e-4,
         lr_multiplier_encoder: float = 0.1,
         weight_decay: float = 0.05,
@@ -126,3 +127,30 @@ class Mask2formerSemantic(LightningModule):
         }
 
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        imgs, targets, img_ids = batch
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        mask_logits, class_logits = self(crops)
+        mask_logits = F.interpolate(mask_logits, self.img_size, mode="bilinear")
+        crop_logits = self.to_per_pixel_logits_semantic(mask_logits, class_logits)
+        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        outs = []
+        for i, logit in enumerate(logits):
+            pred = torch.argmax(logit, dim=0)
+
+            outs.append(
+                {
+                    "img_id": img_ids[i],
+                    "img": imgs[i].detach().cpu(),  # optional but useful for viz
+                    "logits": logit.detach().cpu(),
+                    "pred": pred.detach().cpu(),
+                    "tgt": targets_pp[i].detach().cpu(),  # you have GT, so keep it
+                }
+            )
+
+        return outs

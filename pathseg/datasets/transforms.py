@@ -204,6 +204,10 @@ class CustomTransforms(nn.Module):
     def crop(self, img, target: dict):
         img_crop, target_crop = self.random_crop(img, target)
 
+        # Avoid infinite recursion if there are no masks at all (e.g. blank mask or all ignore_idx)
+        if target["masks"].shape[0] == 0:
+            return img_crop, target_crop
+
         mask_sums = target_crop["masks"].sum(dim=[-2, -1])
         non_empty_mask = mask_sums > 0
 
