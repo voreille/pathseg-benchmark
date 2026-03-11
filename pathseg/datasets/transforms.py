@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 from typing import Tuple
 
 import torch
-from torch import nn
+import torch.nn as nn
+import torchvision.transforms.v2 as T
 from torchvision.transforms import v2 as T
 from torchvision.transforms.v2 import functional as F
+
+from .histo_augment import random_hed_shift, random_hsv_shift
 
 
 class Transforms(nn.Module):
@@ -567,3 +572,162 @@ class AIGradingTransforms(nn.Module):
         img, target = self.random_affine(img, target)
 
         return self.crop(img, target)
+
+
+class HistoTransforms(nn.Module):
+    def __init__(
+        self,
+        img_size: tuple[int, int],
+        scale_range: tuple[float, float],
+        hed_p: float = 0.3,
+        hed_h_shift_limit: float = 0.03,
+        hed_e_shift_limit: float = 0.03,
+        hed_d_shift_limit: float = 0.0,
+        hsv_p: float = 0.0,
+        hsv_hue_shift_limit: float = 0.03,
+        hsv_sat_scale_limit: float = 0.10,
+        hsv_val_scale_limit: float = 0.10,
+        brightness_p: float = 0.5,
+        contrast_p: float = 0.5,
+        max_brightness_delta: float = 32.0,
+        max_contrast_factor: float = 0.2,
+    ):
+        super().__init__()
+
+        self.img_size = img_size
+        self.scale_range = scale_range
+
+        # Histology-specific augmentations
+        self.hed_p = hed_p
+        self.hed_h_shift_limit = hed_h_shift_limit
+        self.hed_e_shift_limit = hed_e_shift_limit
+        self.hed_d_shift_limit = hed_d_shift_limit
+
+        self.hsv_p = hsv_p
+        self.hsv_hue_shift_limit = hsv_hue_shift_limit
+        self.hsv_sat_scale_limit = hsv_sat_scale_limit
+        self.hsv_val_scale_limit = hsv_val_scale_limit
+
+        # Mild generic intensity jitter only
+        self.brightness_p = brightness_p
+        self.contrast_p = contrast_p
+        self.max_brightness_factor = max_brightness_delta / 255.0
+        self.max_contrast_factor = max_contrast_factor
+
+        self.random_horizontal_flip = T.RandomHorizontalFlip()
+        self.random_vertical_flip = T.RandomVerticalFlip()
+        self.random_crop = T.RandomCrop(img_size)
+
+    def _to_float01(self, img: torch.Tensor) -> torch.Tensor:
+        if not torch.is_floating_point(img):
+            img = img.float()
+        if img.max() > 1.0:
+            img = img / 255.0
+        return img.clamp(0.0, 1.0)
+
+    def _to_float255(self, img: torch.Tensor) -> torch.Tensor:
+        return (img.clamp(0.0, 1.0) * 255.0).clamp(0.0, 255.0)
+
+    def random_factor(self, factor: float, center: float = 1.0) -> float:
+        return torch.empty(1).uniform_(center - factor, center + factor).item()
+
+    def brightness(self, img: torch.Tensor) -> torch.Tensor:
+        if torch.rand(()) < self.brightness_p:
+            img = F.adjust_brightness(
+                img,
+                brightness_factor=self.random_factor(self.max_brightness_factor),
+            )
+        return img
+
+    def contrast(self, img: torch.Tensor) -> torch.Tensor:
+        if torch.rand(()) < self.contrast_p:
+            img = F.adjust_contrast(
+                img,
+                contrast_factor=self.random_factor(self.max_contrast_factor),
+            )
+        return img
+
+    def hed_augmentation(self, img: torch.Tensor) -> torch.Tensor:
+        return random_hed_shift(
+            img,
+            h_shift_limit=self.hed_h_shift_limit,
+            e_shift_limit=self.hed_e_shift_limit,
+            d_shift_limit=self.hed_d_shift_limit,
+            p=self.hed_p,
+        )
+
+    def hsv_augmentation(self, img: torch.Tensor) -> torch.Tensor:
+        return random_hsv_shift(
+            img,
+            hue_shift_limit=self.hsv_hue_shift_limit,
+            sat_scale_limit=self.hsv_sat_scale_limit,
+            val_scale_limit=self.hsv_val_scale_limit,
+            p=self.hsv_p,
+        )
+
+    def histo_color_augment(self, img: torch.Tensor) -> torch.Tensor:
+        img = self.hed_augmentation(img)
+        img = self.hsv_augmentation(img)
+
+        # keep only mild generic intensity changes
+        if torch.rand(()) < 0.5:
+            img = self.brightness(img)
+            img = self.contrast(img)
+        else:
+            img = self.contrast(img)
+            img = self.brightness(img)
+
+        return img.clamp(0.0, 1.0)
+
+    def pad(self, img: torch.Tensor, target: dict):
+        pad_h = max(0, self.img_size[-2] - img.shape[-2])
+        pad_w = max(0, self.img_size[-1] - img.shape[-1])
+        padding = [0, 0, pad_w, pad_h]
+
+        img = F.pad(img, padding, padding_mode="edge")
+        target["masks"] = F.pad(target["masks"], padding)
+
+        return img, target
+
+    def crop(self, img: torch.Tensor, target: dict):
+        img_crop, target_crop = self.random_crop(img, target)
+
+        if target["masks"].shape[0] == 0:
+            return img_crop, target_crop
+
+        mask_sums = target_crop["masks"].sum(dim=[-2, -1])
+        non_empty_mask = mask_sums > 0
+
+        if non_empty_mask.sum() == 0:
+            return self.crop(img, target)
+
+        target_crop["masks"] = target_crop["masks"][non_empty_mask]
+        target_crop["labels"] = target_crop["labels"][non_empty_mask]
+
+        return img_crop, target_crop
+
+    def forward(self, img: torch.Tensor, target: dict):
+        # Convert once for histology color transforms
+        img = self._to_float01(img)
+
+        # Histology-specific color transforms in [0, 1]
+        img = self.histo_color_augment(img)
+
+        c, h, w = img.shape
+        target_size = max(h, w)
+
+        img, target = T.ScaleJitter(
+            target_size=(target_size, target_size),
+            scale_range=self.scale_range,
+            antialias=True,
+        )(img, target)
+
+        img, target = self.pad(img, target)
+        img, target = self.random_horizontal_flip(img, target)
+        img, target = self.random_vertical_flip(img, target)
+        img, target = self.crop(img, target)
+
+        # Return in [0, 255] float to match your current downstream code
+        img = self._to_float255(img)
+
+        return img, target

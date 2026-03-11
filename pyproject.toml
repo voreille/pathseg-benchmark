@@ -25,6 +25,7 @@ dependencies = [
   "lightning==2.2.1",
   "transformers==4.39.2",
   "scipy==1.12.0",
+  "scikit-image>=0.25.2,<0.26",
 ]
 
 [project.optional-dependencies]

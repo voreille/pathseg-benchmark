@@ -10,7 +10,8 @@ trainer:
       project: "pathseg-benchmark"
       group: ANORAK
       job_type: baseline
-      tags: ["baseline", "wahoo", "20x", "896x896", "ANORAK+IGNITE", "multitask"]
+      tags:
+        ["baseline", "wahoo", "20x", "896x896", "ANORAK+IGNITE", "multitask"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
@@ -58,8 +59,16 @@ data:
     batch_size: 16
     epoch_repeat: 30
     transforms:
-      class_path: pathseg.datasets.transforms.CustomTransforms
+      class_path: pathseg.datasets.transforms.HistoTransforms
       init_args:
         img_size: [896, 896]
         scale_range: [0.8, 1.2]
-        # disable_color_jitter: true
+        hed_p: 0.3
+        hed_h_shift_limit: 0.02
+        hed_e_shift_limit: 0.02
+        hsv_p: 0.1
+        hsv_hue_shift_limit: 0.02
+        hsv_sat_scale_limit: 0.05
+        hsv_val_scale_limit: 0.05
+        max_brightness_delta: 16
+        max_contrast_factor: 0.15

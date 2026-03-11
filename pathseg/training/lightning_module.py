@@ -1,3 +1,4 @@
+# TODO: use a model builder for better loading flexibility 
 import io
 import math
 from typing import Optional

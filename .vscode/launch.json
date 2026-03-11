@@ -75,7 +75,6 @@
                 "PYTHONPATH": "${workspaceFolder}",
             },
         },
- 
         {
             "name": "Python: main.py fit ANORAK+IGNITE MultiTask Semantic",
             "type": "debugpy",
@@ -270,6 +269,30 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
-        }
+        },
+        {
+            "name": "Python: Export ANORAK+IGNITE MultiTask Semantic to TorchScript",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pathseg/utils/export_torchscript.py",
+            "args": [
+                "--config-path",
+                "/home/valentin/workspaces/pathseg-benchmark/models/spinning-peach-46/anorak_ignite_multitask.yaml",
+                "--ckpt-path",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/2tkzowo1/epoch=26-step=40000.ckpt",
+                "--out-path",
+                "/home/valentin/workspaces/pathseg-benchmark/models/spinning-peach-46/scripted_model.pt",
+                "--device",
+                "cuda"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
     ]
 }
