@@ -76,6 +76,27 @@
             },
         },
         {
+            "name": "Python: main.py fit ANORAK+IGNITE Prototype MultiTask Semantic",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/anorak_ignite_protomultitask.yaml",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Python: main.py fit ANORAK+IGNITE MultiTask Semantic",
             "type": "debugpy",
             "request": "launch",

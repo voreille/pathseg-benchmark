@@ -731,3 +731,28 @@ class HistoTransforms(nn.Module):
         img = self._to_float255(img)
 
         return img, target
+
+
+class CenterPad(nn.Module):
+    def __init__(
+        self,
+        img_size: tuple[int, int],
+    ):
+        super().__init__()
+
+        self.img_size = img_size
+        self.center_crop = T.CenterCrop(img_size)
+
+    def pad(self, img, target: dict):
+        pad_h = max(0, self.img_size[-2] - img.shape[-2])
+        pad_w = max(0, self.img_size[-1] - img.shape[-1])
+        padding = [0, 0, pad_w, pad_h]
+
+        img = F.pad(img, padding, padding_mode="edge")
+        target["masks"] = F.pad(target["masks"], padding)
+
+        return img, target
+
+    def forward(self, img, target: dict):
+        img, target = self.pad(img, target)
+        return self.center_crop(img, target)

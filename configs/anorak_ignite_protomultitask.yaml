@@ -1,0 +1,106 @@
+trainer:
+  precision: "16-mixed"
+  max_steps: 40000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: "pathseg-benchmark"
+      group: ANORAK
+      job_type: proto_head
+      tags:
+        [
+          "prototype",
+          "h0-mini",
+          "20x",
+          "896x896",
+          "ANORAK+IGNITE",
+          "multitask",
+          "support",
+        ]
+      save_dir: ./wandb
+      log_model: false
+
+model:
+  class_path: pathseg.training.prototype_multitask_semantic.TwoHeadSemanticWithSupport
+  init_args:
+    freeze_encoder: false
+    source_id_a: 0
+    source_id_b: 1
+    num_metrics: 2
+    ignore_idx: 255
+    loss_weight_a: 1.0
+    loss_weight_b: 1.0
+    support_every_n_steps: 1
+    refresh_support_on_val: false
+    num_classes_b: 7
+
+    network:
+      class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoder
+      init_args:
+        encoder_id: "h0-mini"
+        img_size: [896, 896]
+        num_compartments: 16
+        selected_compartments: [1, 2, 3, 4, 5, 7, 10, 15] # tumor epithelium, stroma
+        proto_dim: 256
+        center: true
+        temperature_init: 20.0
+
+    tiler:
+      class_path: pathseg.training.tiler.GridPadTiler
+      init_args:
+        tile: 896
+        stride: 448
+        weighted_blend: true
+        pad_mode: "replicate"
+        pad_value: 0.0
+
+data:
+  class_path: pathseg.datasets.prototype_multitask.MultiTaskConcatDataModule
+  init_args:
+    datasets:
+      - name: IGNITE
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite
+        images_subdir: "images"
+        masks_subdir: "masks_semantic"
+        split_csv: "metadata.csv"
+        source_id: 0
+        num_classes: 16
+        sampling_weight: 2.0
+
+      - name: ANORAK
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
+        images_subdir: "images"
+        masks_subdir: "masks_semantic"
+        split_csv: "split.csv"
+        source_id: 1
+        num_classes: 7
+        sampling_weight: 1.0
+
+    img_size: [896, 896]
+    prefetch_factor: 4
+    num_workers: 0
+    batch_size: 16
+    return_background_mask: true
+
+    support_parquet: /home/valentin/workspaces/pathseg-benchmark/data/index/anorak/tile_index_t896_s896.parquet
+    support_source_id: 1
+    support_shots_per_class: 1
+    support_random_seed: 0
+
+    transforms:
+      class_path: pathseg.datasets.transforms.HistoTransforms
+      init_args:
+        img_size: [896, 896]
+        scale_range: [0.8, 1.2]
+        hed_p: 0.3
+        hed_h_shift_limit: 0.02
+        hed_e_shift_limit: 0.02
+        hsv_p: 0.1
+        hsv_hue_shift_limit: 0.02
+        hsv_sat_scale_limit: 0.05
+        hsv_val_scale_limit: 0.05
+        max_brightness_delta: 16
+        max_contrast_factor: 0.15
