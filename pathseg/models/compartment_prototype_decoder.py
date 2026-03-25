@@ -1,3 +1,4 @@
+# TODO: check the shape of the prototypes
 from __future__ import annotations
 
 from typing import Union
@@ -103,35 +104,32 @@ class CompartmentPrototypeDecoder(Encoder):
         x: torch.Tensor,
         ctx: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
-        feat_map = self.forward_features_map(x)         # [B,E,H,W]
-        logits_a = self.head_a(feat_map)                # [B,Ca,H,W]
+        feat_map = self.forward_features_map(x)  # [B,E,H,W]
+        logits_a = self.head_a(feat_map)  # [B,Ca,H,W]
         probs_a = F.softmax(logits_a, dim=1)
-
-        proto_feat = self.proto_proj(feat_map)          # [B,D,H,W]
-        if ctx is not None and "center" in ctx:
-            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
-        proto_feat = F.normalize(proto_feat, dim=1)
-
-        gate = probs_a[:, self.selected_compartments_tensor].sum(
-            dim=1, keepdim=True
-        ).clamp(0.0, 1.0)
 
         out = {
             "feat_map": feat_map,
             "logits_a": logits_a,
             "probs_a": probs_a,
-            "proto_feat": proto_feat,
-            "gate": gate,
         }
 
-        if ctx is not None:
-            logits_b, label_ids_b = self.compute_pattern_logits(
-                proto_feat=proto_feat,
-                probs_a=probs_a,
-                ctx=ctx,
-            )
-            out["logits_b"] = logits_b
-            out["label_ids_b"] = label_ids_b
+        if ctx is None:
+            return out
+
+        proto_feat = self.proto_proj(feat_map)  # [B,D,H,W]
+        if ctx is not None and "center" in ctx:
+            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        logits_b, label_ids_b = self.compute_pattern_logits(
+            proto_feat=proto_feat,
+            probs_a=probs_a,
+            ctx=ctx,
+        )
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = label_ids_b
+        out["proto_feat"] = proto_feat
 
         return out
 
@@ -161,10 +159,10 @@ class CompartmentPrototypeDecoder(Encoder):
         for i, image in enumerate(images):
             image = image.to(device).unsqueeze(0)  # [1,C,H,W]
 
-            feat_map = self.forward_features_map(image)      # [1,E,h,w]
-            logits_a = self.head_a(feat_map)                 # [1,Ca,h,w]
-            probs_a = F.softmax(logits_a, dim=1)             # [1,Ca,h,w]
-            proto_feat = self.proto_proj(feat_map)[0]        # [D,h,w]
+            feat_map = self.forward_features_map(image)  # [1,E,h,w]
+            logits_a = self.head_a(feat_map)  # [1,Ca,h,w]
+            probs_a = F.softmax(logits_a, dim=1)  # [1,Ca,h,w]
+            proto_feat = self.proto_proj(feat_map)[0]  # [D,h,w]
 
             h, w = proto_feat.shape[-2:]
 
@@ -193,7 +191,10 @@ class CompartmentPrototypeDecoder(Encoder):
         center_vec = None
         if self.center:
             all_flat = torch.cat(
-                [feat.permute(1, 2, 0).reshape(-1, feat.shape[0]) for feat in support_feats],
+                [
+                    feat.permute(1, 2, 0).reshape(-1, feat.shape[0])
+                    for feat in support_feats
+                ],
                 dim=0,
             )
             center_vec = all_flat.mean(dim=0)
@@ -212,9 +213,9 @@ class CompartmentPrototypeDecoder(Encoder):
                 feat = feat - center_vec.view(-1, 1, 1)
             feat = F.normalize(feat, dim=0)
 
-            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])     # [N,D]
-            label_flat = label_weights.reshape(label_weights.shape[0], -1)    # [L,N]
-            comp_flat = comp_weights.reshape(comp_weights.shape[0], -1)       # [I,N]
+            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])  # [N,D]
+            label_flat = label_weights.reshape(label_weights.shape[0], -1)  # [L,N]
+            comp_flat = comp_weights.reshape(comp_weights.shape[0], -1)  # [I,N]
 
             for li, label_id in enumerate(label_ids.tolist()):
                 lw = label_flat[li]  # [N]
@@ -237,7 +238,9 @@ class CompartmentPrototypeDecoder(Encoder):
         if proto_vectors:
             ctx = {
                 "prototypes": torch.stack(proto_vectors, dim=0),
-                "label_ids": torch.tensor(proto_label_ids, dtype=torch.long, device=device),
+                "label_ids": torch.tensor(
+                    proto_label_ids, dtype=torch.long, device=device
+                ),
                 "compartment_ids": torch.tensor(
                     proto_compartment_ids, dtype=torch.long, device=device
                 ),
@@ -257,13 +260,13 @@ class CompartmentPrototypeDecoder(Encoder):
     def compute_pattern_logits(
         self,
         *,
-        proto_feat: torch.Tensor,   # [B,D,H,W]
-        probs_a: torch.Tensor,      # [B,Ca,H,W]
+        proto_feat: torch.Tensor,  # [B,D,H,W]
+        probs_a: torch.Tensor,  # [B,Ca,H,W]
         ctx: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prototypes = ctx["prototypes"]           # [M,D]
-        label_ids = ctx["label_ids"]             # [M]
-        comp_ids = ctx["compartment_ids"]        # [M]
+        prototypes = ctx["prototypes"]  # [M,D]
+        label_ids = ctx["label_ids"]  # [M]
+        comp_ids = ctx["compartment_ids"]  # [M]
 
         if prototypes.numel() == 0:
             b, _, h, w = proto_feat.shape
@@ -280,7 +283,10 @@ class CompartmentPrototypeDecoder(Encoder):
 
         unique_label_ids = torch.unique(label_ids, sorted=True)
         logits_b = torch.cat(
-            [weighted[:, label_ids == lid].sum(dim=1, keepdim=True) for lid in unique_label_ids],
+            [
+                weighted[:, label_ids == lid].sum(dim=1, keepdim=True)
+                for lid in unique_label_ids
+            ],
             dim=1,
         )
         logits_b = logits_b * gate
@@ -306,7 +312,9 @@ class CompartmentPrototypeDecoder(Encoder):
         """
         if isinstance(target, int):
             label_ids = torch.tensor([int(target)], dtype=torch.long, device=device)
-            label_weights = torch.ones(1, out_h, out_w, dtype=torch.float32, device=device)
+            label_weights = torch.ones(
+                1, out_h, out_w, dtype=torch.float32, device=device
+            )
             return label_ids, label_weights
 
         if not isinstance(target, torch.Tensor):
