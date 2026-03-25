@@ -424,7 +424,9 @@ class PatternPrototypeDecoder(Encoder):
         )
 
         if learnable_temp:
-            self.log_temp = nn.Parameter(torch.log(torch.tensor(float(temperature_init))))
+            self.log_temp = nn.Parameter(
+                torch.log(torch.tensor(float(temperature_init)))
+            )
         else:
             self.register_buffer(
                 "log_temp",
@@ -489,9 +491,9 @@ class PatternPrototypeDecoder(Encoder):
         support_targets = []
 
         for image, target in zip(images, pattern_targets):
-            image = image.to(device).unsqueeze(0)               # [1,C,H,W]
-            feat_map = self.forward_features_map(image)         # [1,E,h,w]
-            proto_feat = self.proto_proj(feat_map)[0]           # [D,h,w]
+            image = image.to(device).unsqueeze(0)  # [1,C,H,W]
+            feat_map = self.forward_features_map(image)  # [1,E,h,w]
+            proto_feat = self.proto_proj(feat_map)[0]  # [D,h,w]
 
             h, w = proto_feat.shape[-2:]
             target = target.to(device=device, dtype=torch.float32)
@@ -503,7 +505,7 @@ class PatternPrototypeDecoder(Encoder):
                     target.unsqueeze(0),
                     size=(h, w),
                     mode="nearest",
-                ).squeeze(0)                                    # [K,h,w]
+                ).squeeze(0)  # [K,h,w]
 
             support_feats.append(proto_feat)
             support_targets.append(target)
@@ -511,7 +513,10 @@ class PatternPrototypeDecoder(Encoder):
         center_vec = None
         if self.center:
             all_flat = torch.cat(
-                [feat.permute(1, 2, 0).reshape(-1, feat.shape[0]) for feat in support_feats],
+                [
+                    feat.permute(1, 2, 0).reshape(-1, feat.shape[0])
+                    for feat in support_feats
+                ],
                 dim=0,
             )
             center_vec = all_flat.mean(dim=0)
@@ -524,18 +529,18 @@ class PatternPrototypeDecoder(Encoder):
                 feat = feat - center_vec.view(-1, 1, 1)
             feat = F.normalize(feat, dim=0)
 
-            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])   # [N,D]
-            target_flat = target.reshape(target.shape[0], -1)               # [K,N]
+            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])  # [N,D]
+            target_flat = target.reshape(target.shape[0], -1)  # [K,N]
 
             all_feat_flat.append(feat_flat)
             all_target_flat.append(target_flat)
 
-        all_feat_flat = torch.cat(all_feat_flat, dim=0)                     # [Ntot,D]
-        all_target_flat = torch.cat(all_target_flat, dim=1)                 # [K,Ntot]
+        all_feat_flat = torch.cat(all_feat_flat, dim=0)  # [Ntot,D]
+        all_target_flat = torch.cat(all_target_flat, dim=1)  # [K,Ntot]
 
-        label_mass = all_target_flat.sum(dim=1)                             # [K]
+        label_mass = all_target_flat.sum(dim=1)  # [K]
         keep = label_mass > self.eps
-        label_ids = torch.nonzero(keep, as_tuple=False).flatten().long()    # [L]
+        label_ids = torch.nonzero(keep, as_tuple=False).flatten().long()  # [L]
 
         if len(label_ids) == 0:
             ctx = {
@@ -548,7 +553,7 @@ class PatternPrototypeDecoder(Encoder):
 
         prototypes = []
         for label_id in label_ids.tolist():
-            weights = all_target_flat[label_id]                              # [Ntot]
+            weights = all_target_flat[label_id]  # [Ntot]
             weight_sum = weights.sum()
 
             proto = (weights.unsqueeze(1) * all_feat_flat).sum(dim=0) / weight_sum
@@ -556,7 +561,7 @@ class PatternPrototypeDecoder(Encoder):
             prototypes.append(proto)
 
         ctx = {
-            "prototypes": torch.stack(prototypes, dim=0),                    # [L,D]
+            "prototypes": torch.stack(prototypes, dim=0),  # [L,D]
             "label_ids": label_ids.to(device),
         }
         if center_vec is not None:
@@ -566,11 +571,11 @@ class PatternPrototypeDecoder(Encoder):
     def compute_pattern_logits(
         self,
         *,
-        proto_feat: torch.Tensor,   # [B,D,H,W]
+        proto_feat: torch.Tensor,  # [B,D,H,W]
         ctx: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prototypes = ctx["prototypes"]   # [L,D]
-        label_ids = ctx["label_ids"]     # [L]
+        prototypes = ctx["prototypes"]  # [L,D]
+        label_ids = ctx["label_ids"]  # [L]
 
         if prototypes.numel() == 0:
             b, _, h, w = proto_feat.shape
@@ -580,3 +585,83 @@ class PatternPrototypeDecoder(Encoder):
         logits_b = logits_b * torch.exp(self.log_temp).clamp_min(1e-3)
 
         return logits_b, label_ids
+
+
+class ResBlock(nn.Module):
+    def __init__(self, dim: int, num_groups: int = 8):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=dim),
+        )
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(x + self.block(x))
+
+
+class ProtoProj(nn.Module):
+    def __init__(self, in_dim: int, proto_dim: int, depth: int = 2):
+        super().__init__()
+
+        self.spatial = nn.Sequential(*[ResBlock(in_dim) for _ in range(depth)])
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_dim, in_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(in_dim, proto_dim, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.spatial(x)
+        x = self.proj(x)
+        return x
+
+
+class PatternPrototypeDecoderRefined(Encoder):
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        num_classes_b: int = 7,
+        proto_dim: int = 256,
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+        )
+
+        self.num_compartments = int(num_compartments)
+        self.num_classes_b = int(num_classes_b)
+        self.proto_dim = int(proto_dim)
+        self.center = bool(center)
+        self.eps = float(eps)
+
+        self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, kernel_size=1)
+        self.proto_proj = ProtoProj(self.embed_dim, self.proto_dim, depth=2)
+
+        if learnable_temp:
+            self.log_temp = nn.Parameter(
+                torch.log(torch.tensor(float(temperature_init)))
+            )
+        else:
+            self.register_buffer(
+                "log_temp",
+                torch.log(torch.tensor(float(temperature_init))),
+            )
