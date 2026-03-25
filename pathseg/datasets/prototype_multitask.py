@@ -77,7 +77,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         )
         self.support_dataloader_kwargs = {
             "persistent_workers": False if num_workers == 0 else persistent_workers,
-            "num_workers": num_workers,
+            "num_workers": 2,
             "pin_memory": pin_memory,
             "batch_size": 1,
             "prefetch_factor": prefetch_factor if num_workers > 0 else None,

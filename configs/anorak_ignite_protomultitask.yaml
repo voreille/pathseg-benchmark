@@ -33,17 +33,18 @@ model:
     ignore_idx: 255
     loss_weight_a: 1.0
     loss_weight_b: 1.0
-    support_every_n_steps: 1
+    support_every_n_steps: 10
     refresh_support_on_val: false
     num_classes_b: 7
 
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoder
+      class_path: pathseg.models.compartment_prototype_decoder.PatternPrototypeDecoder
+      # class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoder
       init_args:
         encoder_id: "h0-mini"
         img_size: [896, 896]
         num_compartments: 16
-        selected_compartments: [1, 2, 3, 4, 5, 7, 10, 15] # tumor epithelium, stroma
+        # selected_compartments: [1, 2, 3, 4, 5, 7, 10, 15] # tumor epithelium, stroma
         proto_dim: 256
         center: true
         temperature_init: 20.0
@@ -87,7 +88,7 @@ data:
 
     support_parquet: /home/valentin/workspaces/pathseg-benchmark/data/index/anorak/tile_index_t896_s896.parquet
     support_source_id: 1
-    support_shots_per_class: 1
+    support_shots_per_class: 5
     support_random_seed: 0
 
     transforms:

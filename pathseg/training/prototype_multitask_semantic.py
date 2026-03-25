@@ -139,8 +139,41 @@ class TwoHeadSemanticWithSupport(LightningModule):
             self._reset_support_iter(stage)
             return next(getattr(self, attr))
 
+    def _infer_support_target_mode(self, targets) -> str:
+        if len(targets) == 0:
+            raise ValueError("Empty support targets")
+
+        first = targets[0]
+
+        if isinstance(first, dict):
+            return "semantic"
+
+        if isinstance(first, (int,)):
+            return "class"
+
+        if torch.is_tensor(first) and first.ndim == 0:
+            return "class"
+
+        raise TypeError(f"Unsupported support target type: {type(first)}")
+
+    def _prepare_support_pattern_targets(self, targets):
+        mode = self._infer_support_target_mode(targets)
+
+        if mode == "semantic":
+            h_out, w_out = self.network.grid_size
+            return self.preprocess_support_pattern_masks(
+                targets=list(targets),
+                out_hw=(h_out, w_out),
+                num_classes=self.num_classes_b,
+            )
+
+        if mode == "class":
+            return [int(t) for t in targets]
+
+        raise RuntimeError(f"Unhandled mode: {mode}")
+
     @torch.compiler.disable
-    def prepare_support_pattern_targets(
+    def preprocess_support_pattern_masks(
         self,
         targets: list[dict],
         out_hw: tuple[int, int],
@@ -178,16 +211,16 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
     @torch.no_grad()
     def _build_ctx(self, stage: str):
-        images, targets = self._next_support_batch(stage)
+        batch = self._next_support_batch(stage)
 
-        # infer output spatial size from the encoder/token grid
-        h_out, w_out = self.network.grid_size
+        if len(batch) == 3:
+            images, targets, _image_ids = batch
+        elif len(batch) == 2:
+            images, targets = batch
+        else:
+            raise ValueError(f"Unexpected support batch format: len={len(batch)}")
 
-        pattern_targets = self.prepare_support_pattern_targets(
-            targets=list(targets),
-            out_hw=(h_out, w_out),
-            num_classes=self.num_classes_b,
-        )
+        pattern_targets = self._prepare_support_pattern_targets(targets)
 
         return self.network.fit_prototypes(
             images=list(images),
@@ -305,7 +338,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
         b, _, h, w = logits_b.shape
         full = logits_b.new_full(
             (int(b), int(self.num_classes_b), int(h), int(w)),
-            -1e9,
+            -1e4,
         )
         full[:, label_ids_b, :, :] = logits_b
         return full
@@ -444,47 +477,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
         }
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler}
 
-    # ------------------------------------------------------------------
-    # Predict
-    # ------------------------------------------------------------------
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        imgs, targets, source_ids, img_ids = batch
-        imgs = torch.stack(list(imgs)).to(self.device)
-        targets = list(targets)
-        source_ids = list(source_ids)
-        img_ids = list(img_ids)
-
-        sid0 = int(source_ids[0])
-        ctx = self._get_ctx("test")
-
-        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
-        crop_out = self(crops, ctx=ctx)
-        crop_logits = self._select_eval_logits(crop_out, sid0)
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
-
-        logits = self.revert_window_logits_semantic(crop_logits, origins, img_sizes)
-        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
-
-        outs = []
-        for i, logit in enumerate(logits):
-            pred = torch.argmax(logit, dim=0)
-            h, w = int(pred.shape[-2]), int(pred.shape[-1])
-            outs.append(
-                {
-                    "img_id": img_ids[i],
-                    "source_id": sid0,
-                    "img_hw": (h, w),
-                    "img": imgs[i].detach().cpu(),
-                    "logits": logit.detach().cpu(),
-                    "pred": pred.detach().cpu(),
-                    "tgt": targets_pp[i].detach().cpu(),
-                }
-            )
-        return outs
-
-    # ------------------------------------------------------------------
-    # Metrics
-    # ------------------------------------------------------------------
     def init_metrics_semantic(
         self,
         num_classes: Union[int, Sequence[int]],
@@ -538,3 +530,69 @@ class TwoHeadSemanticWithSupport(LightningModule):
             t_in = t.unsqueeze(0)
             self.iou_metrics[dataloader_idx].update(p_in, t_in)
             self.f1_metrics[dataloader_idx].update(p_in, t_in)
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        # support either:
+        # (imgs, targets, source_ids, img_ids)
+        # or (imgs, img_ids)
+        # or (imgs, class_ids, img_ids)
+
+        if len(batch) == 4:
+            imgs, targets, source_ids, img_ids = batch
+        elif len(batch) == 3:
+            imgs, targets, img_ids = batch
+            source_ids = None
+        elif len(batch) == 2:
+            imgs, img_ids = batch
+            targets = None
+            source_ids = None
+        else:
+            raise ValueError(f"Unexpected predict batch format: len={len(batch)}")
+
+        imgs = torch.stack(list(imgs)).to(self.device)
+        img_ids = list(img_ids)
+
+        ctx = self._get_ctx("test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        if source_ids is None:
+            crop_logits = self._expand_proto_logits_to_global(
+                crop_out["logits_b"],
+                crop_out["label_ids_b"],
+            )
+        else:
+            sid0 = int(source_ids[0])
+            crop_logits = self._select_eval_logits(crop_out, sid0)
+
+        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        logits_list = self.revert_window_logits_semantic(
+            crop_logits, origins, img_sizes
+        )
+
+        outs = []
+        for i, logits in enumerate(logits_list):
+            pred = torch.argmax(logits, dim=0)
+            out_i = {
+                "img_id": img_ids[i],
+                "logits": logits.detach().cpu(),
+                "pred": pred.detach().cpu(),
+            }
+
+            if "label_ids_b" in crop_out:
+                out_i["label_ids_b"] = crop_out["label_ids_b"].detach().cpu()
+
+            if targets is not None:
+                t = targets[i]
+                if torch.is_tensor(t):
+                    out_i["target"] = t.detach().cpu()
+                else:
+                    out_i["target"] = t
+
+            if source_ids is not None:
+                out_i["source_id"] = int(source_ids[i])
+
+            outs.append(out_i)
+
+        return outs

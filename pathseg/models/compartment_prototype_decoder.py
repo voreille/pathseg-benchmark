@@ -384,31 +384,6 @@ class CompartmentPrototypeDecoder(Encoder):
 
 
 class PatternPrototypeDecoder(Encoder):
-    """
-    ViT encoder + dense compartment head + prototype head without compartment conditioning.
-
-    Head A:
-      - standard dense compartment segmentation
-
-    Head B:
-      - one prototype per pattern label
-      - no compartment weighting, no gating
-
-    fit_prototypes API
-    ------------------
-    pattern_targets must be a list of tensors [K, H, W], where:
-      - K = number of labels (including bg if desired)
-      - each channel is a support weight map for that label
-
-    Returned ctx format
-    -------------------
-        {
-            "prototypes": Tensor[L, D],
-            "label_ids":  Tensor[L],
-            "center":     Tensor[D],   # only if center=True
-        }
-    """
-
     def __init__(
         self,
         *,
@@ -449,9 +424,7 @@ class PatternPrototypeDecoder(Encoder):
         )
 
         if learnable_temp:
-            self.log_temp = nn.Parameter(
-                torch.log(torch.tensor(float(temperature_init)))
-            )
+            self.log_temp = nn.Parameter(torch.log(torch.tensor(float(temperature_init))))
         else:
             self.register_buffer(
                 "log_temp",
@@ -465,15 +438,15 @@ class PatternPrototypeDecoder(Encoder):
         return x.transpose(1, 2).reshape(x.shape[0], x.shape[2], gh, gw)
 
     def forward_features_map(self, x: torch.Tensor) -> torch.Tensor:
-        return self._tokens_to_map(super().forward(x))  # [B, E, H, W]
+        return self._tokens_to_map(super().forward(x))
 
     def forward(
         self,
         x: torch.Tensor,
         ctx: dict[str, torch.Tensor] | None = None,
     ) -> dict[str, torch.Tensor]:
-        feat_map = self.forward_features_map(x)  # [B,E,H,W]
-        logits_a = self.head_a(feat_map)  # [B,Ca,H,W]
+        feat_map = self.forward_features_map(x)
+        logits_a = self.head_a(feat_map)
         probs_a = F.softmax(logits_a, dim=1)
 
         out = {
@@ -485,7 +458,7 @@ class PatternPrototypeDecoder(Encoder):
         if ctx is None:
             return out
 
-        proto_feat = self.proto_proj(feat_map)  # [B,D,H,W]
+        proto_feat = self.proto_proj(feat_map)
         if "center" in ctx:
             proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
         proto_feat = F.normalize(proto_feat, dim=1)
@@ -494,7 +467,6 @@ class PatternPrototypeDecoder(Encoder):
             proto_feat=proto_feat,
             ctx=ctx,
         )
-
         out["proto_feat"] = proto_feat
         out["logits_b"] = logits_b
         out["label_ids_b"] = label_ids_b
@@ -506,14 +478,6 @@ class PatternPrototypeDecoder(Encoder):
         images: list[torch.Tensor],
         pattern_targets: list[torch.Tensor],
     ) -> dict[str, torch.Tensor]:
-        """
-        Parameters
-        ----------
-        images:
-            list of [C,H,W]
-        pattern_targets:
-            list of [K,H,W] support weight maps
-        """
         if not images:
             raise ValueError("images must not be empty")
         if len(images) != len(pattern_targets):
@@ -521,92 +485,92 @@ class PatternPrototypeDecoder(Encoder):
 
         device = self.pixel_mean.device
 
-        support_feats: list[torch.Tensor] = []
-        support_label_ids: list[torch.Tensor] = []
-        support_label_weights: list[torch.Tensor] = []
+        support_feats = []
+        support_targets = []
 
         for image, target in zip(images, pattern_targets):
-            image = image.to(device).unsqueeze(0)  # [1,C,H,W]
-            feat_map = self.forward_features_map(image)  # [1,E,h,w]
-            proto_feat = self.proto_proj(feat_map)[0]  # [D,h,w]
+            image = image.to(device).unsqueeze(0)               # [1,C,H,W]
+            feat_map = self.forward_features_map(image)         # [1,E,h,w]
+            proto_feat = self.proto_proj(feat_map)[0]           # [D,h,w]
 
             h, w = proto_feat.shape[-2:]
-            label_ids, label_weights = self._pattern_target_to_weights(
-                target,
-                out_h=h,
-                out_w=w,
-                device=device,
-            )  # label_ids:[L], label_weights:[L,h,w]
+            target = target.to(device=device, dtype=torch.float32)
+            if target.ndim != 3:
+                raise ValueError("pattern target tensor must have shape [K,H,W]")
+
+            if target.shape[-2:] != (h, w):
+                target = F.interpolate(
+                    target.unsqueeze(0),
+                    size=(h, w),
+                    mode="nearest",
+                ).squeeze(0)                                    # [K,h,w]
 
             support_feats.append(proto_feat)
-            support_label_ids.append(label_ids)
-            support_label_weights.append(label_weights)
+            support_targets.append(target)
 
         center_vec = None
         if self.center:
             all_flat = torch.cat(
-                [
-                    feat.permute(1, 2, 0).reshape(-1, feat.shape[0])
-                    for feat in support_feats
-                ],
+                [feat.permute(1, 2, 0).reshape(-1, feat.shape[0]) for feat in support_feats],
                 dim=0,
             )
             center_vec = all_flat.mean(dim=0)
 
-        proto_vectors = []
-        proto_label_ids = []
-
-        for feat, label_ids, label_weights in zip(
-            support_feats,
-            support_label_ids,
-            support_label_weights,
-        ):
+        # aggregate all support together
+        all_feat_flat = []
+        all_target_flat = []
+        for feat, target in zip(support_feats, support_targets):
             if center_vec is not None:
                 feat = feat - center_vec.view(-1, 1, 1)
             feat = F.normalize(feat, dim=0)
 
-            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])  # [N,D]
-            label_flat = label_weights.reshape(label_weights.shape[0], -1)  # [L,N]
+            feat_flat = feat.permute(1, 2, 0).reshape(-1, feat.shape[0])   # [N,D]
+            target_flat = target.reshape(target.shape[0], -1)               # [K,N]
 
-            for li, label_id in enumerate(label_ids.tolist()):
-                weights = label_flat[li]  # [N]
-                weight_sum = weights.sum()
+            all_feat_flat.append(feat_flat)
+            all_target_flat.append(target_flat)
 
-                if weight_sum <= self.eps:
-                    continue
+        all_feat_flat = torch.cat(all_feat_flat, dim=0)                     # [Ntot,D]
+        all_target_flat = torch.cat(all_target_flat, dim=1)                 # [K,Ntot]
 
-                proto = (weights.unsqueeze(1) * feat_flat).sum(dim=0) / weight_sum
-                proto = F.normalize(proto.unsqueeze(0), dim=1).squeeze(0)
+        label_mass = all_target_flat.sum(dim=1)                             # [K]
+        keep = label_mass > self.eps
+        label_ids = torch.nonzero(keep, as_tuple=False).flatten().long()    # [L]
 
-                proto_vectors.append(proto)
-                proto_label_ids.append(int(label_id))
-
-        if proto_vectors:
-            ctx = {
-                "prototypes": torch.stack(proto_vectors, dim=0),  # [L,D]
-                "label_ids": torch.tensor(
-                    proto_label_ids, dtype=torch.long, device=device
-                ),
-            }
-        else:
+        if len(label_ids) == 0:
             ctx = {
                 "prototypes": torch.empty(0, self.proto_dim, device=device),
                 "label_ids": torch.empty(0, dtype=torch.long, device=device),
             }
+            if center_vec is not None:
+                ctx["center"] = center_vec
+            return ctx
 
+        prototypes = []
+        for label_id in label_ids.tolist():
+            weights = all_target_flat[label_id]                              # [Ntot]
+            weight_sum = weights.sum()
+
+            proto = (weights.unsqueeze(1) * all_feat_flat).sum(dim=0) / weight_sum
+            proto = F.normalize(proto.unsqueeze(0), dim=1).squeeze(0)
+            prototypes.append(proto)
+
+        ctx = {
+            "prototypes": torch.stack(prototypes, dim=0),                    # [L,D]
+            "label_ids": label_ids.to(device),
+        }
         if center_vec is not None:
             ctx["center"] = center_vec
-
         return ctx
 
     def compute_pattern_logits(
         self,
         *,
-        proto_feat: torch.Tensor,  # [B,D,H,W]
+        proto_feat: torch.Tensor,   # [B,D,H,W]
         ctx: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        prototypes = ctx["prototypes"]  # [L,D]
-        label_ids = ctx["label_ids"]  # [L]
+        prototypes = ctx["prototypes"]   # [L,D]
+        label_ids = ctx["label_ids"]     # [L]
 
         if prototypes.numel() == 0:
             b, _, h, w = proto_feat.shape
@@ -616,46 +580,3 @@ class PatternPrototypeDecoder(Encoder):
         logits_b = logits_b * torch.exp(self.log_temp).clamp_min(1e-3)
 
         return logits_b, label_ids
-
-    def _pattern_target_to_weights(
-        self,
-        target: torch.Tensor,
-        *,
-        out_h: int,
-        out_w: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Parameters
-        ----------
-        target:
-            Tensor[K,H,W] support weight maps
-
-        Returns
-        -------
-        label_ids:
-            [L]
-        label_weights:
-            [L,H,W]
-        """
-        if not isinstance(target, torch.Tensor):
-            raise TypeError("pattern target must be Tensor[K,H,W]")
-
-        target = target.to(device=device, dtype=torch.float32)
-        if target.ndim != 3:
-            raise ValueError("pattern target tensor must have shape [K,H,W]")
-
-        if target.shape[-2:] != (out_h, out_w):
-            target = F.interpolate(
-                target.unsqueeze(0),
-                size=(out_h, out_w),
-                mode="nearest",
-            ).squeeze(0)
-
-        label_mass = target.flatten(1).sum(dim=1)
-        keep = label_mass > 0
-
-        label_ids = torch.nonzero(keep, as_tuple=False).flatten().to(dtype=torch.long)
-        label_weights = target[keep]
-
-        return label_ids, label_weights

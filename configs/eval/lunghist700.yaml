@@ -1,0 +1,30 @@
+trainer:
+  logger: false
+  enable_checkpointing: false
+  precision: "16-mixed"
+
+  callbacks:
+    - class_path: pathseg.callbacks.lunghist700_writer.LungHist700PredictionWriter
+      init_args:
+        output_csv: /home/valentin/workspaces/pathseg-benchmark/results/lunghist700_preds.csv
+        decision_rule: "max_area"
+
+data:
+  class_path: pathseg.datasets.lunghist700.LungHist700PrototypeDataModule
+  init_args:
+    root: /path/to/lunghist700
+    metadata_csv: /path/to/lunghist700/metadata.csv
+    batch_size: 4
+    num_workers: 4
+    img_size: [896, 896]
+    predict_split: "test"
+    support_split: "train"
+    shots_per_class: 5
+    support_fixed_seed: 0
+    support_fixed_for_predict: true
+    exclude_support_from_query: true
+
+    transforms:
+      class_path: pathseg.datasets.transforms.CenterPad
+      init_args:
+        img_size: [896, 896]
