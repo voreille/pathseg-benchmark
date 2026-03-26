@@ -6,6 +6,7 @@ import torch
 from gitignore_parser import parse_gitignore
 from lightning.pytorch import cli
 from lightning.pytorch.callbacks import ModelCheckpoint, ModelSummary
+from lightning.pytorch.cli import SaveConfigCallback
 
 from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.training.lightning_module import LightningModule
@@ -32,23 +33,59 @@ def _run_dir(trainer) -> Path:
     return Path(trainer.default_root_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _configure_checkpoint_dir(trainer) -> None:
+def _get_run_id(trainer) -> str | None:
+    logger = getattr(trainer, "logger", None)
+    if logger is None:
+        return None
+
+    if hasattr(logger, "experiment"):
+        experiment = getattr(logger, "experiment", None)
+        if experiment is not None and hasattr(experiment, "id"):
+            run_id = getattr(experiment, "id", None)
+            if isinstance(run_id, str) and run_id:
+                return run_id
+
+    return None
+
+
+def _get_checkpoint_dir(trainer) -> Path:
+    cached = getattr(trainer, "_pathseg_ckpt_dir", None)
+    if cached is not None:
+        return Path(cached)
+
     run_dir = _run_dir(trainer)
-    run_id = None
-    if trainer.logger is not None:
-        if hasattr(trainer.logger, "experiment"):
-            experiment = getattr(trainer.logger, "experiment", None)
-            if experiment is not None and hasattr(experiment, "id"):
-                run_id = experiment.id
+    run_id = _get_run_id(trainer)
+
     ckpt_dir = (
         run_dir
         / "checkpoints"
         / (run_id if run_id is not None else datetime.now().strftime("%Y%m%d-%H%M%S"))
     )
+    trainer._pathseg_ckpt_dir = str(ckpt_dir)
+    return ckpt_dir
+
+
+def _configure_checkpoint_dir(trainer) -> None:
+    ckpt_dir = _get_checkpoint_dir(trainer)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     for cb in trainer.callbacks:
         if isinstance(cb, ModelCheckpoint):
             cb.dirpath = str(ckpt_dir)
+
+
+class SaveConfigToCheckpointDir(SaveConfigCallback):
+    def save_config(self, trainer, pl_module, stage: str) -> None:
+        ckpt_dir = _get_checkpoint_dir(trainer)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        config_path = ckpt_dir / self.config_filename
+
+        # Official way recommended by Lightning docs
+        config_str = self.parser.dump(self.config, skip_none=False)
+
+        with config_path.open("w", encoding="utf-8") as f:
+            f.write(config_str)
 
 
 class LightningCLI(cli.LightningCLI):
@@ -117,7 +154,12 @@ def main():
         LightningDataModule,
         subclass_mode_model=True,
         subclass_mode_data=True,
-        save_config_callback=None,
+        save_config_callback=SaveConfigToCheckpointDir,
+        save_config_kwargs={
+            "config_filename": "config.yaml",
+            "overwrite": False,
+            "save_to_log_dir": False,
+        },
         seed_everything_default=0,
         trainer_defaults={
             "precision": "16-mixed",

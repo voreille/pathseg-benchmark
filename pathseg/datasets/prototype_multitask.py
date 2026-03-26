@@ -64,6 +64,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         support_max_class_ratio: float = 0.75,
         pin_memory: bool = True,
         persistent_workers: bool = True,
+        support_num_workers: int = 2,
     ) -> None:
         super().__init__(
             root="",
@@ -77,7 +78,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         )
         self.support_dataloader_kwargs = {
             "persistent_workers": False if num_workers == 0 else persistent_workers,
-            "num_workers": 2,
+            "num_workers": support_num_workers,
             "pin_memory": pin_memory,
             "batch_size": 1,
             "prefetch_factor": prefetch_factor if num_workers > 0 else None,

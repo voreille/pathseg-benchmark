@@ -58,7 +58,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
         self.num_classes_a = network.num_compartments
         self.num_classes_b = num_classes_b
         if self.num_classes_b is None:
-            raise ValueError("network.num_classes_b must be defined.")
+            raise ValueError("num_classes_b must be defined.")
 
         self.init_metrics_semantic(
             [self.num_classes_a, self.num_classes_b],
@@ -139,53 +139,32 @@ class TwoHeadSemanticWithSupport(LightningModule):
             self._reset_support_iter(stage)
             return next(getattr(self, attr))
 
-    def _infer_support_target_mode(self, targets) -> str:
-        if len(targets) == 0:
-            raise ValueError("Empty support targets")
-
-        first = targets[0]
-
-        if isinstance(first, dict):
-            return "semantic"
-
-        if isinstance(first, (int,)):
-            return "class"
-
-        if torch.is_tensor(first) and first.ndim == 0:
-            return "class"
-
-        raise TypeError(f"Unsupported support target type: {type(first)}")
-
-    def _prepare_support_pattern_targets(self, targets):
-        mode = self._infer_support_target_mode(targets)
-
-        if mode == "semantic":
-            h_out, w_out = self.network.grid_size
-            return self.preprocess_support_pattern_masks(
-                targets=list(targets),
-                out_hw=(h_out, w_out),
-                num_classes=self.num_classes_b,
-            )
-
-        if mode == "class":
-            return [int(t) for t in targets]
-
-        raise RuntimeError(f"Unhandled mode: {mode}")
-
     @torch.compiler.disable
     def preprocess_support_pattern_masks(
         self,
         targets: list[dict],
         out_hw: tuple[int, int],
         num_classes: int,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor:
+        """
+        Convert support annotations to dense soft masks [S, K, H, W].
+
+        Each target is expected to contain:
+          - target["masks"]:  [N, H, W] bool or float
+          - target["labels"]: [N]
+        """
         h_out, w_out = out_hw
         support_targets = []
 
         for target in targets:
-            masks = target["masks"]  # [N, H, W] bool
+            masks = target["masks"]  # [N,H,W]
             labels = target["labels"]  # [N]
             device = labels.device
+
+            if masks.ndim != 3:
+                raise ValueError("target['masks'] must have shape [N,H,W]")
+            if labels.ndim != 1:
+                raise ValueError("target['labels'] must have shape [N]")
 
             h, w = masks.shape[-2:]
             weights = torch.zeros(
@@ -196,6 +175,10 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
             for mask, label in zip(masks, labels):
                 class_id = int(label.item())
+                if not (0 <= class_id < num_classes):
+                    raise ValueError(
+                        f"support label {class_id} outside [0, {num_classes - 1}]"
+                    )
                 weights[class_id] += mask.float()
 
             if (h, w) != (h_out, w_out):
@@ -207,7 +190,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
             support_targets.append(weights)
 
-        return support_targets
+        return torch.stack(support_targets, dim=0)  # [S,K,H,W]
 
     @torch.no_grad()
     def _build_ctx(self, stage: str):
@@ -220,11 +203,21 @@ class TwoHeadSemanticWithSupport(LightningModule):
         else:
             raise ValueError(f"Unexpected support batch format: len={len(batch)}")
 
-        pattern_targets = self._prepare_support_pattern_targets(targets)
+        h_out, w_out = self.network.grid_size
+        pattern_targets = self.preprocess_support_pattern_masks(
+            targets=list(targets),
+            out_hw=(h_out, w_out),
+            num_classes=self.num_classes_b,
+        )
+
+        if not torch.is_tensor(images):
+            images = torch.stack(list(images), dim=0)
+
+        images = images.to(self.device)
 
         return self.network.fit_prototypes(
-            images=list(images),
-            pattern_targets=pattern_targets,
+            support_images=images,
+            pattern_targets=pattern_targets.to(self.device),
         )
 
     def _get_ctx(self, stage: str):
@@ -366,35 +359,39 @@ class TwoHeadSemanticWithSupport(LightningModule):
         if step > warmup_end:
             return 1.0
 
-        # linear ramp
         return (step - warmup_start) / (warmup_end - warmup_start)
 
     def training_step(self, batch, batch_idx):
-        w_b = self._get_loss_weight_b() * self.loss_weight_b
-
         imgs, targets, source_ids, _image_ids = batch
         source_ids = source_ids.to(imgs.device)
 
-        w_b = self._get_loss_weight_b()
+        w_b = self._get_loss_weight_b() * self.loss_weight_b
 
         m_a = source_ids == self.source_id_a
         m_b = source_ids == self.source_id_b
+
         if w_b == 0.0:
             out = self(imgs, ctx=None)
-            logits_a = F.interpolate(out["logits_a"], self.img_size, mode="bilinear")
+            logits_a = F.interpolate(
+                out["logits_a"], self.img_size, mode="bilinear", align_corners=False
+            )
 
             loss_a = self._loss_on_subset_fixed(
                 logits_a, targets, m_a, self.criterion_a
             )
             loss_b = torch.zeros((), device=imgs.device)
             loss_total = self.loss_weight_a * loss_a
-            label_ids_b = []
+            label_ids_b = torch.empty(0, dtype=torch.long, device=imgs.device)
         else:
             ctx = self._get_ctx("train")
             out = self(imgs, ctx=ctx)
 
-            logits_a = F.interpolate(out["logits_a"], self.img_size, mode="bilinear")
-            logits_b = F.interpolate(out["logits_b"], self.img_size, mode="bilinear")
+            logits_a = F.interpolate(
+                out["logits_a"], self.img_size, mode="bilinear", align_corners=False
+            )
+            logits_b = F.interpolate(
+                out["logits_b"], self.img_size, mode="bilinear", align_corners=False
+            )
             label_ids_b = out["label_ids_b"]
 
             loss_a = self._loss_on_subset_fixed(
@@ -410,7 +407,11 @@ class TwoHeadSemanticWithSupport(LightningModule):
         self.log("train_frac_b", m_b.float().mean(), sync_dist=True)
         self.log(
             "train_num_support_labels",
-            torch.tensor(len(label_ids_b), device=imgs.device, dtype=torch.float32),
+            torch.tensor(
+                label_ids_b.numel(),
+                device=imgs.device,
+                dtype=torch.float32,
+            ),
             sync_dist=True,
         )
         self.log("loss_weight_b", w_b, prog_bar=False, sync_dist=True)
@@ -439,7 +440,9 @@ class TwoHeadSemanticWithSupport(LightningModule):
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_out = self(crops, ctx=ctx)
         crop_logits = self._select_eval_logits(crop_out, sid0)
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        crop_logits = F.interpolate(
+            crop_logits, self.img_size, mode="bilinear", align_corners=False
+        )
 
         logits_list = self.revert_window_logits_semantic(
             crop_logits, origins, img_sizes
@@ -532,11 +535,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
             self.f1_metrics[dataloader_idx].update(p_in, t_in)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        # support either:
-        # (imgs, targets, source_ids, img_ids)
-        # or (imgs, img_ids)
-        # or (imgs, class_ids, img_ids)
-
         if len(batch) == 4:
             imgs, targets, source_ids, img_ids = batch
         elif len(batch) == 3:
@@ -566,7 +564,9 @@ class TwoHeadSemanticWithSupport(LightningModule):
             sid0 = int(source_ids[0])
             crop_logits = self._select_eval_logits(crop_out, sid0)
 
-        crop_logits = F.interpolate(crop_logits, self.img_size, mode="bilinear")
+        crop_logits = F.interpolate(
+            crop_logits, self.img_size, mode="bilinear", align_corners=False
+        )
         logits_list = self.revert_window_logits_semantic(
             crop_logits, origins, img_sizes
         )

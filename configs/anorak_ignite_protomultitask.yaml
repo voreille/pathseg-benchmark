@@ -38,13 +38,13 @@ model:
     num_classes_b: 7
 
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.PatternPrototypeDecoder
-      # class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoder
+      # class_path: pathseg.models.compartment_prototype_decoder.PatternPrototypeDecoderRefined
+      class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoderRefined
       init_args:
         encoder_id: "h0-mini"
         img_size: [896, 896]
         num_compartments: 16
-        # selected_compartments: [1, 2, 3, 4, 5, 7, 10, 15] # tumor epithelium, stroma
+        selected_compartments: [1, 2, 3, 4, 5, 7, 9, 10, 12, 15] # tumor epithelium, stroma
         proto_dim: 256
         center: true
         temperature_init: 20.0
