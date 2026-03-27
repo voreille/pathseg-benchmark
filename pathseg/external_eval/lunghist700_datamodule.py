@@ -4,11 +4,38 @@ from pathlib import Path
 
 import pandas as pd
 import torch
+from lightning.pytorch.utilities import rank_zero_info
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
-from lightning.pytorch.utilities import rank_zero_info
+from torchvision import tv_tensors
+from torchvision.transforms import v2 as T
+from torchvision.transforms.v2 import functional as F
 
 from pathseg.datasets.lightning_data_module import LightningDataModule
+
+
+class CenterPad(torch.nn.Module):
+    def __init__(
+        self,
+        img_size: tuple[int, int],
+    ):
+        super().__init__()
+
+        self.img_size = img_size
+        self.center_crop = T.CenterCrop(img_size)
+
+    def pad(self, img):
+        pad_h = max(0, self.img_size[-2] - img.shape[-2])
+        pad_w = max(0, self.img_size[-1] - img.shape[-1])
+        padding = [0, 0, pad_w, pad_h]
+
+        img = F.pad(img, padding, padding_mode="edge")
+
+        return img
+
+    def forward(self, img):
+        img = self.pad(img)
+        return self.center_crop(img)
 
 
 class LungHist700ROIDataset(Dataset):
@@ -39,16 +66,10 @@ class LungHist700ROIDataset(Dataset):
         image_path = self.root / row["image_relpath"]
         label = int(row["label_id"])
 
-        image = Image.open(image_path).convert("RGB")
+        image = tv_tensors.Image(Image.open(image_path).convert("RGB"))
 
         if self.transform is not None:
             image = self.transform(image)
-        else:
-            image = (
-                torch.from_numpy(__import__("numpy").array(image))
-                .permute(2, 0, 1)
-                .float()
-            )
 
         if self.return_image_id:
             return image, label, image_id
@@ -71,6 +92,7 @@ class LungHist700SupportDataset(Dataset):
         transform=None,
         fixed_seed: int = 0,
         fixed: bool = False,
+        norm_01: bool = True,
     ) -> None:
         self.df = df.reset_index(drop=True).copy()
         self.root = Path(root)
@@ -78,6 +100,7 @@ class LungHist700SupportDataset(Dataset):
         self.transform = transform
         self.fixed_seed = int(fixed_seed)
         self.fixed = bool(fixed)
+        self.norm_01 = bool(norm_01)
 
         required_cols = {"sample_id", "image_relpath", "label_id"}
         missing = required_cols - set(self.df.columns)
@@ -122,15 +145,12 @@ class LungHist700SupportDataset(Dataset):
             image_path = self.root / row["image_relpath"]
             label = int(row["label_id"])
 
-            image = Image.open(image_path).convert("RGB")
+            image = tv_tensors.Image(Image.open(image_path).convert("RGB"))
             if self.transform is not None:
                 image = self.transform(image)
-            else:
-                image = (
-                    torch.from_numpy(__import__("numpy").array(image))
-                    .permute(2, 0, 1)
-                    .float()
-                )
+
+            if self.norm_01:
+                image = image / 255.0
 
             images.append(image)
             labels.append(label)
@@ -158,6 +178,7 @@ class LungHist700PrototypeDataModule(LightningDataModule):
         support_fixed_seed: int = 0,
         support_fixed_for_predict: bool = True,
         exclude_support_from_query: bool = True,
+        ignore_idx: int = 255,
     ) -> None:
         super().__init__(
             root=str(root),
@@ -165,7 +186,7 @@ class LungHist700PrototypeDataModule(LightningDataModule):
             num_workers=num_workers,
             num_classes=0,
             num_metrics=0,
-            ignore_idx=255,
+            ignore_idx=ignore_idx,
             img_size=img_size,
             prefetch_factor=prefetch_factor,
         )
@@ -239,7 +260,7 @@ class LungHist700PrototypeDataModule(LightningDataModule):
             df=support_df,
             root=self.root,
             shots_per_class=self.shots_per_class,
-            transform=self.val_transforms,
+            transform=CenterPad(self.img_size),
             fixed_seed=self.support_fixed_seed,
             fixed=self.support_fixed_for_predict,
         )
@@ -278,6 +299,20 @@ class LungHist700PrototypeDataModule(LightningDataModule):
         )
 
     def predict_dataloader(self):
+        return DataLoader(
+            self.predict_dataset,
+            shuffle=False,
+            collate_fn=self.predict_collate,
+            **self.dataloader_kwargs,
+        )
+
+    def val_support_dataloader(self):
+        return self.support_dataloader()
+
+    def test_support_dataloader(self):
+        return self.support_dataloader()
+
+    def test_dataloader(self):
         return DataLoader(
             self.predict_dataset,
             shuffle=False,

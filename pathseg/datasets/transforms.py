@@ -4,7 +4,6 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
-import torchvision.transforms.v2 as T
 from torchvision.transforms import v2 as T
 from torchvision.transforms.v2 import functional as F
 

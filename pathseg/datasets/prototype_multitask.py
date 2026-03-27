@@ -65,6 +65,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         pin_memory: bool = True,
         persistent_workers: bool = True,
         support_num_workers: int = 2,
+        predict_split: str = "val",
     ) -> None:
         super().__init__(
             root="",
@@ -355,6 +356,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
             "fit",
             "validate",
             "test",
+            "predict",
             None,
         ):
             support_cfg = self._get_support_cfg()

@@ -1,19 +1,24 @@
 trainer:
   logger: false
-  enable_checkpointing: false
   precision: "16-mixed"
-
   callbacks:
-    - class_path: pathseg.callbacks.lunghist700_writer.LungHist700PredictionWriter
-      init_args:
-        output_csv: /home/valentin/workspaces/pathseg-benchmark/results/lunghist700_preds.csv
-        decision_rule: "max_area"
+  - class_path: pathseg.external_eval.callbacks.SavePrototypeROIPredictionsCallback
+    init_args:
+      out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/lunghist700/test/
+      num_classes_b: 7
+      num_classes_a: 16
+      save_figures: true
+      save_pred_masks: false
+      save_logits_pt: false
+      save_compartment_logits_pt: false
+      save_numpy_masks: false
+      write_csv: true
 
 data:
-  class_path: pathseg.datasets.lunghist700.LungHist700PrototypeDataModule
+  class_path: pathseg.external_eval.lunghist700_datamodule.LungHist700PrototypeDataModule
   init_args:
-    root: /path/to/lunghist700
-    metadata_csv: /path/to/lunghist700/metadata.csv
+    root: /home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/LungHist700_20x
+    metadata_csv: /home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/metadata_formatted.csv
     batch_size: 4
     num_workers: 4
     img_size: [896, 896]
@@ -23,8 +28,4 @@ data:
     support_fixed_seed: 0
     support_fixed_for_predict: true
     exclude_support_from_query: true
-
-    transforms:
-      class_path: pathseg.datasets.transforms.CenterPad
-      init_args:
-        img_size: [896, 896]
+    transforms: ~

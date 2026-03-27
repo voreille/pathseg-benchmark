@@ -97,6 +97,30 @@
             "justMyCode": false
         },
         {
+            "name": "Python: main.py predict ANORAK+IGNITE Prototype MultiTask Semantic on LungHist700",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "predict",
+                "-c",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/7q92arqz/config.yaml",
+                "-c",
+                "configs/eval/lunghist700.yaml",
+                "--no_compile",
+                "--ckpt_path",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/7q92arqz/epoch=26-step=40000.ckpt",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
             "name": "Python: main.py fit ANORAK+IGNITE MultiTask Semantic",
             "type": "debugpy",
             "request": "launch",

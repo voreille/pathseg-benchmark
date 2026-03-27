@@ -121,6 +121,79 @@ class _PrototypeDecoderBase(Encoder):
             proto_feat = self.proto_proj(feat_map)
         return feat_map.float(), logits_a.float(), proto_feat.float()
 
+    def _validate_support_tensors(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,
+    ) -> None:
+        if support_images.ndim != 4:
+            raise ValueError(
+                f"support_images must have shape [S, C, H, W], got {tuple(support_images.shape)}"
+            )
+        if pattern_targets.ndim != 4:
+            raise ValueError(
+                f"pattern_targets must have shape [S, K, H, W], got {tuple(pattern_targets.shape)}"
+            )
+        if support_images.shape[0] != pattern_targets.shape[0]:
+            raise ValueError(
+                "support_images and pattern_targets must have the same batch size"
+            )
+
+    def _validate_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> None:
+        if images.ndim != 4:
+            raise ValueError(
+                f"images must have shape [S, C, H, W], got {tuple(images.shape)}"
+            )
+        if image_labels.ndim != 1:
+            raise ValueError(
+                f"image_labels must have shape [S], got {tuple(image_labels.shape)}"
+            )
+        if images.shape[0] != image_labels.shape[0]:
+            raise ValueError("images and image_labels must have the same batch size")
+        if image_labels.numel() > 0:
+            min_label = int(image_labels.min().item())
+            max_label = int(image_labels.max().item())
+            if min_label < 0 or max_label >= int(num_classes):
+                raise ValueError(
+                    f"image_labels must lie in [0, {int(num_classes) - 1}]"
+                )
+
+    def _make_full_image_pattern_targets(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> torch.Tensor:
+        """
+        Build dense per-image one-hot support masks:
+            [S, K, H, W]
+        where the whole image is assigned to its image-level label.
+        """
+        s, _, h, w = images.shape
+        device = images.device
+        image_labels = image_labels.to(device=device, dtype=torch.long)
+
+        pattern_targets = torch.zeros(
+            s,
+            int(num_classes),
+            h,
+            w,
+            dtype=torch.float32,
+            device=device,
+        )
+        pattern_targets[
+            torch.arange(s, device=device),
+            image_labels,
+        ] = 1.0
+        return pattern_targets
+
 
 class CompartmentPrototypeDecoder(_PrototypeDecoderBase):
     """
@@ -227,18 +300,7 @@ class CompartmentPrototypeDecoder(_PrototypeDecoderBase):
         *,
         compartment_ignore_index: int = 255,
     ) -> dict[str, torch.Tensor]:
-        if support_images.ndim != 4:
-            raise ValueError(
-                f"support_images must have shape [S, C, H, W], got {tuple(support_images.shape)}"
-            )
-        if pattern_targets.ndim != 4:
-            raise ValueError(
-                f"pattern_targets must have shape [S, K, H, W], got {tuple(pattern_targets.shape)}"
-            )
-        if support_images.shape[0] != pattern_targets.shape[0]:
-            raise ValueError(
-                "support_images and pattern_targets must have the same batch size"
-            )
+        self._validate_support_tensors(support_images, pattern_targets)
 
         if compartment_targets is not None:
             if compartment_targets.ndim not in (3, 4):
@@ -304,15 +366,54 @@ class CompartmentPrototypeDecoder(_PrototypeDecoderBase):
         label_ids, comp_idx = torch.nonzero(valid, as_tuple=True)
 
         ctx = {
-            "prototypes": prototypes[label_ids, comp_idx].contiguous(),  # [M,D], fp32
-            "label_ids": label_ids.to(dtype=torch.long, device=device),  # [M]
+            "prototypes": prototypes[label_ids, comp_idx].contiguous(),
+            "label_ids": label_ids.to(dtype=torch.long, device=device),
             "compartment_ids": self.selected_compartments_tensor[comp_idx].to(
                 device=device
-            ),  # [M]
+            ),
         }
         if center_vec is not None:
             ctx["center"] = center_vec
         return ctx
+
+    @torch.no_grad()
+    def fit_prototypes_from_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+        compartment_targets: torch.Tensor | None = None,
+        compartment_ignore_index: int = 255,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Build prototypes from image-level labels by assuming each image belongs
+        entirely to one pattern class, while compartment localization comes from:
+          - compartment_targets if provided
+          - otherwise predicted head A compartments inside fit_prototypes()
+        """
+        device = self.pixel_mean.device
+        images = images.to(device=device)
+        image_labels = image_labels.to(device=device)
+
+        self._validate_image_labels(
+            images,
+            image_labels,
+            num_classes=num_classes,
+        )
+
+        pattern_targets = self._make_full_image_pattern_targets(
+            images,
+            image_labels,
+            num_classes=num_classes,
+        )
+
+        return self.fit_prototypes(
+            support_images=images,
+            pattern_targets=pattern_targets,
+            compartment_targets=compartment_targets,
+            compartment_ignore_index=compartment_ignore_index,
+        )
 
     def compute_pattern_logits(
         self,
@@ -323,9 +424,9 @@ class CompartmentPrototypeDecoder(_PrototypeDecoderBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prototypes = ctx["prototypes"].to(
             device=proto_feat.device, dtype=proto_feat.dtype
-        )  # [M,D]
-        label_ids = ctx["label_ids"].to(device=proto_feat.device)  # [M]
-        comp_ids = ctx["compartment_ids"].to(device=proto_feat.device)  # [M]
+        )
+        label_ids = ctx["label_ids"].to(device=proto_feat.device)
+        comp_ids = ctx["compartment_ids"].to(device=proto_feat.device)
 
         if prototypes.numel() == 0:
             b, _, h, w = proto_feat.shape
@@ -485,18 +586,7 @@ class PatternPrototypeDecoder(_PrototypeDecoderBase):
         support_images: torch.Tensor,
         pattern_targets: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        if support_images.ndim != 4:
-            raise ValueError(
-                f"support_images must have shape [S, C, H, W], got {tuple(support_images.shape)}"
-            )
-        if pattern_targets.ndim != 4:
-            raise ValueError(
-                f"pattern_targets must have shape [S, K, H, W], got {tuple(pattern_targets.shape)}"
-            )
-        if support_images.shape[0] != pattern_targets.shape[0]:
-            raise ValueError(
-                "support_images and pattern_targets must have the same batch size"
-            )
+        self._validate_support_tensors(support_images, pattern_targets)
 
         device = self.pixel_mean.device
         support_images = support_images.to(device=device)
@@ -542,12 +632,98 @@ class PatternPrototypeDecoder(_PrototypeDecoderBase):
         label_ids = torch.nonzero(valid, as_tuple=False).flatten().long()
 
         ctx = {
-            "prototypes": prototypes[label_ids].contiguous(),  # [L,D], fp32
-            "label_ids": label_ids.to(device=device),  # [L]
+            "prototypes": prototypes[label_ids].contiguous(),
+            "label_ids": label_ids.to(device=device),
         }
         if center_vec is not None:
             ctx["center"] = center_vec
         return ctx
+
+    @torch.no_grad()
+    def infer_spatial_support_from_head_a(
+        self,
+        images: torch.Tensor,
+        *,
+        selected_compartments: list[int] | None = None,
+    ) -> torch.Tensor:
+        """
+        Returns spatial support weights [S,1,h,w] derived from head A.
+
+        If selected_compartments is provided:
+            use the soft union of those compartments.
+
+        Otherwise:
+            use non-background support = 1 - p(bg),
+            where bg is channel 0.
+        """
+        device = self.pixel_mean.device
+        images = images.to(device=device)
+
+        _, logits_a, _ = self._fit_features_fp32(images)
+        probs_a = F.softmax(logits_a, dim=1)  # [S,Ca,h,w]
+
+        if selected_compartments is not None:
+            if len(selected_compartments) == 0:
+                raise ValueError("selected_compartments must not be empty")
+            comp_idx = torch.tensor(
+                [int(c) for c in selected_compartments],
+                dtype=torch.long,
+                device=device,
+            )
+            return probs_a[:, comp_idx].sum(dim=1, keepdim=True).clamp(0.0, 1.0)
+
+        return (1.0 - probs_a[:, 0:1]).clamp(0.0, 1.0)
+
+    @torch.no_grad()
+    def fit_prototypes_from_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        selected_compartments: list[int] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Build unconditioned prototypes from image-level labels.
+
+        Spatial support is restricted using head A:
+          - union of selected_compartments if provided
+          - otherwise non-background support from head A
+        """
+        device = self.pixel_mean.device
+        images = images.to(device=device)
+        image_labels = image_labels.to(device=device)
+
+        self._validate_image_labels(
+            images,
+            image_labels,
+            num_classes=self.num_classes_b,
+        )
+
+        full_pattern_targets = self._make_full_image_pattern_targets(
+            images,
+            image_labels,
+            num_classes=self.num_classes_b,
+        )  # [S,K,H,W]
+
+        spatial_support = self.infer_spatial_support_from_head_a(
+            images,
+            selected_compartments=selected_compartments,
+        )  # [S,1,h,w]
+
+        if spatial_support.shape[-2:] != full_pattern_targets.shape[-2:]:
+            spatial_support = F.interpolate(
+                spatial_support,
+                size=full_pattern_targets.shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        pattern_targets = full_pattern_targets * spatial_support
+
+        return self.fit_prototypes(
+            support_images=images,
+            pattern_targets=pattern_targets,
+        )
 
     def compute_pattern_logits(
         self,
@@ -658,7 +834,6 @@ class CompartmentPrototypeDecoderRefined(CompartmentPrototypeDecoder):
         learnable_temp: bool = False,
         eps: float = 1e-6,
     ) -> None:
-
         super().__init__(
             encoder_id=encoder_id,
             img_size=img_size,

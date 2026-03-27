@@ -4,7 +4,9 @@ import random
 import pandas as pd
 
 # %%
-df = pd.read_csv("/home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/metadata.csv")
+df = pd.read_csv(
+    "/home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/metadata.csv"
+)
 # %%
 df.head()
 # %%
@@ -14,6 +16,8 @@ df.info()
 patient_ids = df["patient_id"].unique()
 
 class_names = df["class_name"].unique()
+# %%
+class_names
 # %%
 class_by_patient = {}
 for patient_id in patient_ids:
@@ -42,5 +46,31 @@ for class_name in class_names:
 
 # %%
 support_patient_ids
+
+# %%
+class_id_mapping = {
+    "aca_bd": 0,
+    "aca_md": 1,
+    "aca_pd": 2,
+    "scc_bd": 3,
+    "scc_md": 4,
+    "scc_pd": 5,
+    "nor": 6,
+}
+df["label_id"] = df["class_name"].map(class_id_mapping)
+
+# %%
+df["sample_id"] = df["filename"]
+df["image_relpath"] = df["filename"].apply(lambda x: f"{x}.png")
+
+# %%
+df["split"] = "test"
+df.loc[df["patient_id"].isin(support_patient_ids), "split"] = "train"
+
+# %%
+df.to_csv(
+    "/home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/metadata_formatted.csv",
+    index=False,
+)
 
 # %%
