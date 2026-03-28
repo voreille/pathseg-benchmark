@@ -850,3 +850,419 @@ class CompartmentPrototypeDecoderRefined(CompartmentPrototypeDecoder):
             eps=eps,
         )
         self.proto_proj = ProtoProj(self.embed_dim, self.proto_dim, depth=2)
+
+
+class CompartmentPrototypeDecoderStructured(CompartmentPrototypeDecoderRefined):
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int,
+        num_classes_b: int,
+        selected_compartments: list[int],
+        label_ids_by_compartment: dict[int, list[int]] | None = None,
+        proto_dim: int = 256,
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        min_prototype_mass: float = 1.0,
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+            center=center,
+            num_compartments=num_compartments,
+            selected_compartments=selected_compartments,
+            proto_dim=proto_dim,
+            temperature_init=temperature_init,
+            learnable_temp=learnable_temp,
+            eps=eps,
+        )
+
+        self.num_classes_b = int(num_classes_b)
+        self.min_prototype_mass = float(min_prototype_mass)
+
+        # --------------------------------------------------
+        # Build allowed (label, compartment) mask
+        # --------------------------------------------------
+        allowed = torch.ones(
+            self.num_classes_b,
+            len(self.selected_compartments),
+            dtype=torch.bool,
+        )
+
+        if label_ids_by_compartment is not None:
+            allowed.zero_()
+            comp_to_local = {c: i for i, c in enumerate(self.selected_compartments)}
+
+            for comp_id, label_ids in label_ids_by_compartment.items():
+                comp_id = int(comp_id)
+                if comp_id not in comp_to_local:
+                    raise ValueError(f"{comp_id} not in selected_compartments")
+
+                local_idx = comp_to_local[comp_id]
+                for lid in label_ids:
+                    lid = int(lid)
+                    if not (0 <= lid < self.num_classes_b):
+                        raise ValueError(f"invalid label id {lid}")
+                    allowed[lid, local_idx] = True
+
+        self.register_buffer(
+            "allowed_label_compartment",
+            allowed,
+            persistent=False,
+        )
+
+    # --------------------------------------------------
+    # Prototype fitting with masking + mass threshold
+    # --------------------------------------------------
+    @torch.no_grad()
+    def fit_prototypes(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,
+        compartment_targets: torch.Tensor | None = None,
+        *,
+        compartment_ignore_index: int = 255,
+    ) -> dict[str, torch.Tensor]:
+
+        self._validate_support_tensors(support_images, pattern_targets)
+
+        device = self.pixel_mean.device
+        support_images = support_images.to(device)
+        pattern_targets = pattern_targets.to(device, dtype=torch.float32)
+
+        _, logits_a, proto_feat = self._fit_features_fp32(support_images)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        s, d, h, w = proto_feat.shape
+        K = int(pattern_targets.shape[1])
+        I = len(self.selected_compartments)
+
+        if pattern_targets.shape[-2:] != (h, w):
+            pattern_targets = F.interpolate(
+                pattern_targets,
+                size=(h, w),
+                mode="nearest",
+            )
+
+        # ---- compartments ----
+        if compartment_targets is None:
+            comp_weights = probs_a[:, self.selected_compartments_tensor]
+        else:
+            comp_weights = self._compartment_maps_to_weights(
+                compartment_targets=compartment_targets.to(device),
+                out_h=h,
+                out_w=w,
+                ignore_index=compartment_ignore_index,
+            )
+
+        # ---- normalize proto features ----
+        center_vec = None
+        if self.center:
+            center_vec = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(0)
+            proto_feat = proto_feat - center_vec.view(1, -1, 1, 1)
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        feat_flat = proto_feat.permute(0, 2, 3, 1).reshape(s, h * w, d)
+        label_flat = pattern_targets.reshape(s, K, h * w)
+        comp_flat = comp_weights.reshape(s, I, h * w)
+
+        weights = label_flat.unsqueeze(2) * comp_flat.unsqueeze(1)  # [S,K,I,N]
+
+        # ---- apply allowed mask ----
+        allowed = self.allowed_label_compartment.to(
+            device=weights.device,
+            dtype=weights.dtype,
+        )
+        weights = weights * allowed.unsqueeze(0).unsqueeze(-1)
+
+        proto_sum = torch.einsum("skin,snd->kid", weights, feat_flat)
+        weight_sum = weights.sum(dim=(0, 3))  # [K,I]
+
+        # ---- threshold ----
+        valid = weight_sum > self.min_prototype_mass
+        if not valid.any():
+            return self._empty_ctx_conditioned(device, self.proto_dim, center_vec)
+
+        prototypes = proto_sum / weight_sum.clamp_min(self.eps).unsqueeze(-1)
+        prototypes = F.normalize(prototypes, dim=-1)
+
+        label_ids, comp_idx = torch.nonzero(valid, as_tuple=True)
+
+        ctx = {
+            "prototypes": prototypes[label_ids, comp_idx],
+            "label_ids": label_ids,
+            "compartment_ids": self.selected_compartments_tensor[comp_idx],
+        }
+
+        if center_vec is not None:
+            ctx["center"] = center_vec
+
+        return ctx
+
+    # --------------------------------------------------
+    # Inference with BG for unsupported compartments
+    # --------------------------------------------------
+    def compute_pattern_logits(
+        self,
+        *,
+        proto_feat: torch.Tensor,
+        probs_a: torch.Tensor,
+        ctx: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        prototypes = ctx["prototypes"]
+        label_ids = ctx["label_ids"]
+        comp_ids = ctx["compartment_ids"]
+
+        b, _, h, w = proto_feat.shape
+        device = proto_feat.device
+        dtype = proto_feat.dtype
+
+        if prototypes.numel() == 0:
+            bg = probs_a[:, self.selected_compartments_tensor].sum(1, keepdim=True)
+            return bg.to(dtype), torch.tensor([0], device=device)
+
+        sim = torch.einsum("bdhw,md->bmhw", proto_feat, prototypes)
+        sim = sim * torch.exp(self.log_temp.to(dtype=dtype)).clamp_min(1e-3)
+
+        comp_weights = probs_a[:, comp_ids]
+        weighted = sim * comp_weights
+
+        unique_labels = torch.unique(label_ids, sorted=True)
+
+        logits = torch.cat(
+            [
+                weighted[:, label_ids == lid].sum(dim=1, keepdim=True)
+                for lid in unique_labels
+            ],
+            dim=1,
+        )
+
+        # ---- BG from unsupported compartments ----
+        selected = self.selected_compartments_tensor.to(device)
+        supported = torch.unique(comp_ids)
+
+        unsupported = selected[~torch.isin(selected, supported)]
+
+        if unsupported.numel() > 0:
+            bg_mass = probs_a[:, unsupported].sum(dim=1, keepdim=True)
+        else:
+            bg_mass = torch.zeros((b, 1, h, w), device=device, dtype=probs_a.dtype)
+
+        bg_label = 0
+
+        if (unique_labels == bg_label).any():
+            idx = int((unique_labels == bg_label).nonzero()[0])
+            logits[:, idx : idx + 1] += bg_mass.to(dtype)
+            return logits, unique_labels
+
+        logits = torch.cat([bg_mass.to(dtype), logits], dim=1)
+        label_ids = torch.cat([torch.tensor([0], device=device), unique_labels], dim=0)
+
+        return logits, label_ids
+
+
+class TumorOnlyPrototypeDecoderRefined(Encoder):
+    """
+    Prototype decoder restricted to a subset of compartments (e.g. tumor only).
+
+    Key ideas:
+    - prototypes built only inside selected compartments
+    - background class (0) is ignored for prototype fitting
+    - logits are NOT gated (masking handled in loss)
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        num_classes_b: int = 7,
+        selected_compartments: list[int],
+        label_ids_by_compartment: dict[int, list[int]],
+        proto_dim: int = 256,
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+    ):
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+        )
+
+        if not selected_compartments:
+            raise ValueError("selected_compartments must not be empty")
+
+        self.selected_compartments = [int(c) for c in selected_compartments]
+        self.label_ids_by_compartment = {
+            int(k): [int(vv) for vv in v] for k, v in label_ids_by_compartment.items()
+        }
+
+        self.num_compartments = int(num_compartments)
+        self.num_classes_b = int(num_classes_b)
+        self.center = bool(center)
+        self.eps = float(eps)
+
+        # --- heads ---
+        self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, 1)
+        self.proto_proj = ProtoProj(self.embed_dim, proto_dim, depth=2)
+
+        # temperature
+        if learnable_temp:
+            self.log_temp = nn.Parameter(torch.log(torch.tensor(temperature_init)))
+        else:
+            self.register_buffer(
+                "log_temp",
+                torch.log(torch.tensor(temperature_init)),
+            )
+
+    # --------------------------------------------------------
+    # utilities
+    # --------------------------------------------------------
+    def _tokens_to_map(self, x: torch.Tensor) -> torch.Tensor:
+        gh, gw = self.grid_size
+        return x.transpose(1, 2).reshape(x.shape[0], x.shape[2], gh, gw)
+
+    def forward_features_map(self, x):
+        return self._tokens_to_map(super().forward(x))
+
+    # --------------------------------------------------------
+    # forward
+    # --------------------------------------------------------
+    def forward(self, x, ctx=None):
+        feat = self.forward_features_map(x)
+        logits_a = self.head_a(feat)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        out = {
+            "feat_map": feat,
+            "logits_a": logits_a,
+            "probs_a": probs_a,
+        }
+
+        if ctx is None:
+            return out
+
+        proto_feat = self.proto_proj(feat)
+        if ctx.get("center") is not None:
+            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        logits_b = torch.einsum("bdhw,kd->bkhw", proto_feat, ctx["prototypes"])
+        logits_b = logits_b * torch.exp(self.log_temp)
+
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = ctx["label_ids"]
+        return out
+
+    # --------------------------------------------------------
+    # prototype fitting
+    # --------------------------------------------------------
+    @torch.no_grad()
+    def fit_prototypes(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,  # [S,K,H,W]
+    ):
+        device = support_images.device
+        support_images = support_images.to(device)
+        pattern_targets = pattern_targets.to(device).float()
+
+        feat = self.forward_features_map(support_images)
+        logits_a = self.head_a(feat)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        proto_feat = self.proto_proj(feat)
+
+        S, D, H, W = proto_feat.shape
+        K = pattern_targets.shape[1]
+
+        # resize GT if needed
+        if pattern_targets.shape[-2:] != (H, W):
+            pattern_targets = F.interpolate(pattern_targets, (H, W), mode="nearest")
+
+        # ----------------------------------------
+        # tumor mask from head A
+        # ----------------------------------------
+        comp_idx = torch.tensor(
+            self.selected_compartments,
+            device=device,
+            dtype=torch.long,
+        )
+        prob_tumor = probs_a[:, comp_idx].sum(dim=1, keepdim=True)  # [S,1,H,W]
+
+        # ----------------------------------------
+        # center + normalize
+        # ----------------------------------------
+        if self.center:
+            center = proto_feat.permute(0, 2, 3, 1).reshape(-1, D).mean(0)
+            proto_feat = proto_feat - center.view(1, -1, 1, 1)
+        else:
+            center = None
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        feat_flat = proto_feat.permute(0, 2, 3, 1).reshape(S, H * W, D)
+        target_flat = pattern_targets.reshape(S, K, H * W)
+        tumor_flat = prob_tumor.reshape(S, 1, H * W)
+
+        # ----------------------------------------
+        # remove background (class 0)
+        # ----------------------------------------
+        valid_classes = torch.arange(K, device=device)
+        valid_classes = valid_classes[valid_classes != 0]
+
+        target_flat = target_flat[:, valid_classes]
+
+        # ----------------------------------------
+        # weighted prototype
+        # ----------------------------------------
+        weights = target_flat * tumor_flat  # [S,K',N]
+
+        proto_sum = torch.einsum("skn,snd->kd", weights, feat_flat)
+        weight_sum = weights.sum(dim=(0, 2))
+
+        valid = weight_sum > self.eps
+        if not valid.any():
+            return {
+                "prototypes": torch.empty(0, D, device=device),
+                "label_ids": torch.empty(0, dtype=torch.long, device=device),
+            }
+
+        prototypes = proto_sum / weight_sum.clamp_min(self.eps).unsqueeze(-1)
+        prototypes = F.normalize(prototypes, dim=-1)
+
+        label_ids = valid_classes[valid]
+
+        ctx = {
+            "prototypes": prototypes[valid],
+            "label_ids": label_ids,
+        }
+        if center is not None:
+            ctx["center"] = center
+
+        return ctx

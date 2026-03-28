@@ -110,8 +110,6 @@ class TwoHeadsLinearDecoder(Encoder):
         num_classes_a: int,  # Head A classes (e.g., tumor/stroma/bg/...)
         num_classes_b: int,  # Head B classes (e.g., 7 patterns incl bg, or 6 patterns)
         img_size: tuple[int, int],
-        cond_dim: int = 16,  # K: conditioning feature channels derived from A
-        cond_from: str = "logits",  # "probs" or "logits", apparently with stop grad better logits
         sub_norm: bool = False,
         ckpt_path: str = "",
         discard_last_mlp: bool = False,
@@ -124,11 +122,8 @@ class TwoHeadsLinearDecoder(Encoder):
             discard_last_mlp=discard_last_mlp,
         )
 
-        assert cond_from in {"probs", "logits"}, "cond_from must be 'probs' or 'logits'"
         self.num_classes_a = num_classes_a
         self.num_classes_b = num_classes_b
-        self.cond_dim = cond_dim
-        self.cond_from = cond_from
 
         # Head A: token -> compartment logits
         self.head_a = nn.Linear(self.embed_dim, num_classes_a)
@@ -161,3 +156,35 @@ class TwoHeadsLinearDecoder(Encoder):
             "logits_a": self._tokens_to_map(a_tok_logits),
             "logits_b": self._tokens_to_map(b_tok_logits),
         }
+
+
+class ResBlock(nn.Module):
+    def __init__(self, dim: int, num_groups: int = 8):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=dim),
+        )
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.act(x + self.block(x))
+
+
+class ConvRefiner(nn.Module):
+    def __init__(self, in_dim: int, proto_dim: int, depth: int = 2):
+        super().__init__()
+        self.spatial = nn.Sequential(*[ResBlock(in_dim) for _ in range(depth)])
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_dim, in_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(in_dim, proto_dim, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.spatial(x)
+        x = self.proj(x)
+        return x

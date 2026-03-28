@@ -29,6 +29,22 @@ def _area_stats_from_pred(
     return counts.tolist(), fracs.tolist()
 
 
+def _extract_scalar_label(x):
+    if x is None:
+        return None
+
+    if torch.is_tensor(x):
+        if x.ndim == 0:
+            return int(x.item())
+        return None
+
+    if isinstance(x, (int, float, str)):
+        return int(x)
+
+    # segmentation dict or anything else
+    return None
+
+
 @dataclass
 class SavePrototypeROIPredictionsCallback(Callback):
     out_dir: str
@@ -231,12 +247,7 @@ class SavePrototypeROIPredictionsCallback(Callback):
 
             pred_label = int(np.argmax(np.asarray(area_frac_b)))
 
-            gt_label = o.get("target", None)
-            if torch.is_tensor(gt_label):
-                gt_label = int(gt_label.item())
-            elif gt_label is not None:
-                gt_label = int(gt_label)
-
+            gt_label = _extract_scalar_label(o.get("gt_label", None))
             label_ids_b = o.get("label_ids_b", None)
             if torch.is_tensor(label_ids_b):
                 label_ids_b = [int(x) for x in label_ids_b.tolist()]

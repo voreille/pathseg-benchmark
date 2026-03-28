@@ -88,6 +88,11 @@ class MultiTaskConcatDataModule(LightningDataModule):
         if not datasets or len(datasets) < 2:
             raise ValueError("datasets must be a list with at least two dataset dicts.")
 
+        if predict_split not in {"train", "val", "test"}:
+            raise ValueError(
+                f"predict_split must be one of ['train', 'val', 'test'], got {predict_split}"
+            )
+
         self.datasets_cfg = datasets
         self.num_iterations_per_epoch = num_iterations_per_epoch
         self.num_samples_per_epoch = num_iterations_per_epoch * batch_size
@@ -104,6 +109,8 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self.support_min_class_ratio = float(support_min_class_ratio)
         self.support_max_class_ratio = float(support_max_class_ratio)
 
+        self.predict_split = str(predict_split)
+
         self.save_hyperparameters(ignore=["transforms", "val_transforms"])
 
         if transforms is not None:
@@ -116,6 +123,9 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self.val_transforms = val_transforms
 
         rank_zero_info(f"[MultiTaskConcatDataModule] batch_size={batch_size}")
+        rank_zero_info(
+            f"[MultiTaskConcatDataModule] predict_split={self.predict_split}"
+        )
         for d in self.datasets_cfg:
             rank_zero_info(
                 f"[MultiTaskConcatDataModule] dataset={d.get('name', '?')} root={d['root']} source_id={d.get('source_id')}"
@@ -196,7 +206,9 @@ class MultiTaskConcatDataModule(LightningDataModule):
                 ids,
                 images_dir,
                 masks_dir,
+                transforms=self.val_transforms,
                 ignore_idx=self.ignore_idx,
+                return_background=self.return_background_mask,
                 return_image_id=True,
             )
 
@@ -224,9 +236,6 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
     @staticmethod
     def support_collate(batch):
-        # support dataset returns a single item:
-        #   (images: list[Tensor], targets: list[target])
-        # DataLoader(batch_size=1) -> [ (images, targets) ]
         images, targets = batch[0]
         return images, targets
 
@@ -272,7 +281,6 @@ class MultiTaskConcatDataModule(LightningDataModule):
             df["frac_valid"] = df["valid_pixels"] / (df["w"] * df["h"])
 
         df = df[df["frac_valid"] >= self.support_min_valid_frac]
-
         df = df[df["class_frac_valid"] >= self.support_min_class_ratio]
         df = df[df["class_frac_valid"] <= self.support_max_class_ratio]
         return df
@@ -336,14 +344,24 @@ class MultiTaskConcatDataModule(LightningDataModule):
                 )
 
             if stage in ("predict", None):
-                base_val_p = self._make_base_dataset(
-                    ids=val_ids,
+                split_to_ids = {
+                    "train": train_ids,
+                    "val": val_ids,
+                    "test": test_ids,
+                }
+                pred_ids = split_to_ids[self.predict_split]
+
+                base_pred = self._make_base_dataset(
+                    ids=pred_ids,
                     images_dir=images_dir,
                     masks_dir=masks_dir,
                     stage="predict",
                 )
                 self.predict_wrapped.append(
-                    (f"{name}_val", WrapWithSource(base_val_p, source_id=source_id))
+                    (
+                        f"{name}_{self.predict_split}",
+                        WrapWithSource(base_pred, source_id=source_id),
+                    )
                 )
 
         if stage in ("fit", "validate", None):
@@ -417,7 +435,6 @@ class MultiTaskConcatDataModule(LightningDataModule):
                 return_background=self.return_background_mask,
             )
 
-            # no real test split needed, reuse fixed val support
             self.support_test_dataset = self.support_val_dataset
 
         return self

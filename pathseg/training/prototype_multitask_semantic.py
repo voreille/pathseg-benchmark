@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import io
 from typing import Optional, Sequence, Union
 
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from matplotlib.lines import Line2D
+from PIL import Image
 from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
@@ -387,6 +393,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
     # Training / eval
     # ------------------------------------------------------------------
     def _get_loss_weight_b(self):
+
         step = self.global_step
 
         warmup_start = 1000
@@ -469,7 +476,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
         batch_idx=None,
         dataloader_idx=None,
         log_prefix=None,
-        is_notebook=False,
     ):
         imgs, targets, source_ids, image_ids = batch
         sid0 = int(source_ids[0])
@@ -486,9 +492,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
         logits_list = self.revert_window_logits_semantic(
             crop_logits, origins, img_sizes
         )
-
-        if is_notebook:
-            return logits_list
 
         targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
         self.update_metrics(logits_list, targets_pp, dataloader_idx)
@@ -655,7 +658,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
                 "pred_a": pred_a.detach().cpu(),  # full-image head A prediction
                 "img_hw": tuple(int(x) for x in pred_b.shape[-2:]),
                 "dataloader_idx": int(dataloader_idx),
-                "img": imgs[i].detach().cpu()
+                "img": imgs[i].detach().cpu(),
             }
 
             if "label_ids_b" in crop_out:
@@ -674,3 +677,463 @@ class TwoHeadSemanticWithSupport(LightningModule):
             outs.append(out_i)
 
         return outs
+
+
+class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
+    def __init__(
+        self,
+        *args,
+        tumor_compartment_ids: Optional[list[int]] = None,
+        tumor_threshold: float = 0.5,
+        use_fixed_loss_weight_b: Optional[float] = 1.0,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        if tumor_compartment_ids is None:
+            tumor_compartment_ids = [1]
+
+        self.tumor_compartment_ids = torch.tensor(
+            tumor_compartment_ids, dtype=torch.long
+        )
+        self.tumor_threshold = float(tumor_threshold)
+        self.use_fixed_loss_weight_b = use_fixed_loss_weight_b
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+    def _get_tumor_prob(
+        self,
+        logits_a: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        logits_a:
+            [B, Ca, H, W] -> returns [B, H, W]
+            [Ca, H, W]    -> returns [H, W]
+        """
+        tumor_ids = self.tumor_compartment_ids.to(logits_a.device)
+
+        if logits_a.ndim == 4:
+            probs_a = F.softmax(logits_a, dim=1)
+            return probs_a[:, tumor_ids].sum(dim=1)
+
+        if logits_a.ndim == 3:
+            probs_a = F.softmax(logits_a, dim=0)
+            return probs_a[tumor_ids].sum(dim=0)
+
+        raise ValueError(f"Unexpected logits_a shape: {tuple(logits_a.shape)}")
+
+    def _loss_on_subset_proto_conditioned(
+        self,
+        logits_a: torch.Tensor,
+        logits_b: torch.Tensor,
+        label_ids_b: torch.Tensor,
+        targets_list,
+        subset_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if subset_mask.sum().item() == 0 or logits_b.shape[1] == 0:
+            return torch.zeros((), device=logits_b.device)
+
+        logits_s = logits_b[subset_mask]
+        targets_s = self._select(targets_list, subset_mask)
+        targets_pp = self._targets_to_tensor(targets_s, logits_b.device)
+
+        prob_tumor = self._get_tumor_prob(logits_a)[subset_mask]  # [B,H,W]
+
+        targets_pp = targets_pp.clone()
+        targets_pp[targets_pp == 0] = self.ignore_idx
+
+        local_targets = self._remap_targets_to_local_labels(targets_pp, label_ids_b)
+
+        weight = None
+        if self.class_weights_b_tensor.numel() > 0:
+            weight = self.class_weights_b_tensor[label_ids_b].to(logits_b.device)
+
+        loss = F.cross_entropy(
+            logits_s,
+            local_targets,
+            ignore_index=self.ignore_idx,
+            weight=weight,
+            reduction="none",
+        )  # [B,H,W]
+
+        loss = loss * prob_tumor
+        denom = prob_tumor.sum().clamp_min(1e-6)
+        return loss.sum() / denom
+
+    def _force_bg_outside_tumor(
+        self,
+        logits_b: torch.Tensor,  # [C,H,W] or [B,C,H,W], global classes, bg=0
+        logits_a: torch.Tensor,  # [Ca,H,W] or [B,Ca,H,W]
+    ) -> torch.Tensor:
+        logits_b = logits_b.clone()
+        prob_tumor = self._get_tumor_prob(logits_a)
+        outside = prob_tumor < self.tumor_threshold
+
+        if logits_b.ndim == 3:
+            logits_b[1:, outside] = -1e4
+            logits_b[0, outside] = 0.0
+            return logits_b
+
+        if logits_b.ndim == 4:
+            logits_b[:, 1:, :, :] = logits_b[:, 1:, :, :].masked_fill(
+                outside.unsqueeze(1), -1e4
+            )
+            bg = logits_b[:, 0]
+            bg[outside] = 0.0
+            logits_b[:, 0] = bg
+            return logits_b
+
+        raise ValueError(f"Expected 3D or 4D logits_b, got {tuple(logits_b.shape)}")
+
+    def _stitch_head_a_logits(
+        self,
+        crop_out: dict,
+        origins,
+        img_sizes,
+    ) -> list[torch.Tensor]:
+        crop_logits_a = F.interpolate(
+            crop_out["logits_a"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        return self.revert_window_logits_semantic(crop_logits_a, origins, img_sizes)
+
+    def _stitch_head_b_logits(
+        self,
+        crop_out: dict,
+        origins,
+        img_sizes,
+    ) -> list[torch.Tensor]:
+        crop_logits_b = self._expand_proto_logits_to_global(
+            crop_out["logits_b"],
+            crop_out["label_ids_b"],
+        )
+        crop_logits_b = F.interpolate(
+            crop_logits_b,
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        return self.revert_window_logits_semantic(crop_logits_b, origins, img_sizes)
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        imgs, targets, source_ids, _image_ids = batch
+        source_ids = source_ids.to(imgs.device)
+
+        if self.use_fixed_loss_weight_b is None:
+            w_b = self._get_loss_weight_b() * self.loss_weight_b
+        else:
+            w_b = float(self.use_fixed_loss_weight_b)
+
+        m_a = source_ids == self.source_id_a
+        m_b = source_ids == self.source_id_b
+
+        if w_b == 0.0:
+            out = self(imgs, ctx=None)
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = torch.zeros((), device=imgs.device)
+            loss_total = self.loss_weight_a * loss_a
+            label_ids_b = torch.empty(0, dtype=torch.long, device=imgs.device)
+        else:
+            ctx = self._get_ctx("train")
+            out = self(imgs, ctx=ctx)
+
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            logits_b = F.interpolate(
+                out["logits_b"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            label_ids_b = out["label_ids_b"]
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = self._loss_on_subset_proto_conditioned(
+                logits_a=logits_a,
+                logits_b=logits_b,
+                label_ids_b=label_ids_b,
+                targets_list=targets,
+                subset_mask=m_b,
+            )
+            loss_total = self.loss_weight_a * loss_a + w_b * loss_b
+
+        self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
+        self.log("train_loss_a", loss_a, sync_dist=True)
+        self.log("train_loss_b", loss_b, sync_dist=True)
+        self.log("train_frac_a", m_a.float().mean(), sync_dist=True)
+        self.log("train_frac_b", m_b.float().mean(), sync_dist=True)
+        self.log(
+            "train_num_support_labels",
+            torch.tensor(
+                label_ids_b.numel(),
+                device=imgs.device,
+                dtype=torch.float32,
+            ),
+            sync_dist=True,
+        )
+        self.log("loss_weight_b", w_b, prog_bar=False, sync_dist=True)
+
+        return loss_total
+
+    # ------------------------------------------------------------------
+    # Eval / Test
+    # ------------------------------------------------------------------
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        dataloader_idx=None,
+        log_prefix=None,
+        is_notebook: bool = False,
+    ):
+        imgs, targets, source_ids, image_ids = batch
+        source_ids = torch.as_tensor(source_ids, device=self.device)
+        sid0 = int(source_ids[0].item())
+
+        ctx = self._get_ctx("val" if log_prefix == "val" else "test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        logits_a_list = self._stitch_head_a_logits(crop_out, origins, img_sizes)
+
+        logits_b_list = None
+        if "logits_b" in crop_out and "label_ids_b" in crop_out:
+            logits_b_list = self._stitch_head_b_logits(crop_out, origins, img_sizes)
+            logits_b_list = [
+                self._force_bg_outside_tumor(lb, la)
+                for lb, la in zip(logits_b_list, logits_a_list)
+            ]
+
+        if is_notebook:
+            return {
+                "logits_a_list": logits_a_list,
+                "logits_b_list": logits_b_list,
+            }
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        if sid0 == self.source_id_a:
+            self.update_metrics(logits_a_list, targets_pp, dataloader_idx)
+        else:
+            if logits_b_list is None:
+                raise RuntimeError(
+                    "Expected head B logits during eval for source_id_b."
+                )
+            self.update_metrics(logits_b_list, targets_pp, dataloader_idx)
+
+        if batch_idx == 0:
+            img0 = imgs[0]
+            tgt0 = targets_pp[0]
+
+            plot = self.plot_two_head_semantic(
+                img=img0,
+                logits_a=logits_a_list[0],
+                logits_b=None if logits_b_list is None else logits_b_list[0],
+                target=tgt0,
+                gt_head="a" if sid0 == self.source_id_a else "b",
+            )
+            self.log_wandb_image(
+                f"{log_prefix}_{dataloader_idx}_two_head_{batch_idx}",
+                plot,
+                commit=False,
+            )
+
+    # ------------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------------
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        if len(batch) == 4:
+            imgs, targets, source_ids, img_ids = batch
+        elif len(batch) == 3:
+            imgs, targets, img_ids = batch
+            source_ids = None
+        elif len(batch) == 2:
+            imgs, img_ids = batch
+            targets = None
+            source_ids = None
+        else:
+            raise ValueError(f"Unexpected predict batch format: len={len(batch)}")
+
+        if torch.is_tensor(imgs):
+            imgs = imgs.to(self.device)
+        else:
+            imgs = torch.stack(list(imgs), dim=0).to(self.device)
+
+        img_ids = list(img_ids)
+
+        if source_ids is not None:
+            source_ids = torch.as_tensor(source_ids, device=self.device)
+
+        ctx = self._get_ctx("test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        logits_a_list = self._stitch_head_a_logits(crop_out, origins, img_sizes)
+        logits_b_list = self._stitch_head_b_logits(crop_out, origins, img_sizes)
+        logits_b_list = [
+            self._force_bg_outside_tumor(lb, la)
+            for lb, la in zip(logits_b_list, logits_a_list)
+        ]
+
+        outs = []
+        for i, (logits_b, logits_a_i) in enumerate(zip(logits_b_list, logits_a_list)):
+            pred_b = torch.argmax(logits_b, dim=0)
+            pred_a = torch.argmax(logits_a_i, dim=0)
+
+            out_i = {
+                "img_id": img_ids[i],
+                "logits": logits_b.detach().cpu(),
+                "pred": pred_b.detach().cpu(),
+                "logits_a": logits_a_i.detach().cpu(),
+                "pred_a": pred_a.detach().cpu(),
+                "img_hw": tuple(int(x) for x in pred_b.shape[-2:]),
+                "dataloader_idx": int(dataloader_idx),
+                "img": imgs[i].detach().cpu(),
+            }
+
+            if "label_ids_b" in crop_out:
+                out_i["label_ids_b"] = crop_out["label_ids_b"].detach().cpu()
+
+            if targets is not None:
+                t = targets[i]
+                out_i["target"] = t.detach().cpu() if torch.is_tensor(t) else t
+
+            if source_ids is not None:
+                out_i["source_id"] = int(source_ids[i].item())
+
+            outs.append(out_i)
+
+        return outs
+
+    # ------------------------------------------------------------------
+    # Plotting
+    # ------------------------------------------------------------------
+    @torch.compiler.disable
+    def plot_two_head_semantic(
+        self,
+        img: torch.Tensor,
+        logits_a: torch.Tensor | None = None,
+        logits_b: torch.Tensor | None = None,
+        target: torch.Tensor | None = None,
+        gt_head: str | None = None,
+        cmap: str = "tab20",
+    ):
+        panels = [("Image", "img")]
+        if target is not None:
+            panels.append((f"GT ({gt_head})" if gt_head is not None else "GT", "gt"))
+        if logits_a is not None:
+            panels.append(("Head A", "a"))
+        if logits_b is not None:
+            panels.append(("Head B", "b"))
+
+        ncols = len(panels)
+        fig, axes = plt.subplots(
+            1, ncols, figsize=(5 * ncols, 5), sharex=True, sharey=True
+        )
+        if ncols == 1:
+            axes = [axes]
+
+        img_np = img.detach().cpu().numpy().transpose(1, 2, 0)
+        if img_np.max() > 1.0:
+            img_np = img_np / 255.0
+        img_np = np.clip(img_np, 0, 1)
+
+        target_np = None if target is None else target.detach().cpu().numpy()
+
+        pred_a = None
+        if logits_a is not None:
+            pred_a = torch.argmax(logits_a, dim=0).detach().cpu().numpy()
+
+        pred_b = None
+        if logits_b is not None:
+            pred_b = torch.argmax(logits_b, dim=0).detach().cpu().numpy()
+
+        uniq_parts = []
+        if target_np is not None:
+            uniq_parts.append(np.unique(target_np))
+        if pred_a is not None:
+            uniq_parts.append(np.unique(pred_a))
+        if pred_b is not None:
+            uniq_parts.append(np.unique(pred_b))
+
+        if len(uniq_parts) == 0:
+            unique_classes = np.array([0], dtype=np.int64)
+        else:
+            unique_classes = np.unique(np.concatenate(uniq_parts))
+
+        num_classes = len(unique_classes)
+        colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))
+
+        if self.ignore_idx in unique_classes:
+            ignore_mask = unique_classes == self.ignore_idx
+            colors[ignore_mask] = [0, 0, 0, 1]
+
+        custom_cmap = mcolors.ListedColormap(colors)
+        norm = mcolors.Normalize(vmin=0, vmax=num_classes - 1)
+
+        def encode_mask(x: np.ndarray) -> np.ndarray:
+            return np.digitize(x, unique_classes, right=False) - 1
+
+        for ax, (title, kind) in zip(axes, panels):
+            ax.set_title(title)
+            ax.axis("off")
+
+            if kind == "img":
+                ax.imshow(img_np)
+            elif kind == "gt":
+                ax.imshow(
+                    encode_mask(target_np),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind == "a":
+                ax.imshow(
+                    encode_mask(pred_a),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind == "b":
+                ax.imshow(
+                    encode_mask(pred_b),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+
+        patches = [
+            Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
+            for i in range(num_classes)
+        ]
+        fig.legend(handles=patches, loc="upper left")
+
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, facecolor="black")
+        plt.close(fig)
+        buf.seek(0)
+        return Image.open(buf)
