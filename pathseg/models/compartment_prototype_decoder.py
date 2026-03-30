@@ -1174,7 +1174,7 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
         if ctx is None:
             return out
 
-        proto_feat = self.proto_proj(feat)
+        proto_feat = self.proto_proj(feat.detach())
         if ctx.get("center") is not None:
             proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
 
