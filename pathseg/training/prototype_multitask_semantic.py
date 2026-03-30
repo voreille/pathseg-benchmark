@@ -86,6 +86,10 @@ class TwoHeadSemanticWithSupport(LightningModule):
         )
 
         self.criterion_a = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_a)
+        self.criterion_b_aux = nn.CrossEntropyLoss(
+            ignore_index=self.ignore_idx, weight=w_b
+        )
+
         self.register_buffer(
             "class_weights_b_tensor",
             w_b if w_b is not None else torch.empty(0),
@@ -454,8 +458,11 @@ class TwoHeadSemanticWithSupport(LightningModule):
                 mode="bilinear",
                 align_corners=False,
             )
-            loss_b_aux = self._loss_on_subset_proto(
-                logits_b_aux, label_ids_b, targets, m_b
+            loss_b_aux = self._loss_on_subset_fixed(
+                logits_b_aux,
+                targets,
+                m_b,
+                self.criterion_b_aux,
             )
             self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
             loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux
@@ -899,8 +906,11 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
                 mode="bilinear",
                 align_corners=False,
             )
-            loss_b_aux = self._loss_on_subset_proto(
-                logits_b_aux, label_ids_b, targets, m_b
+            loss_b_aux = self._loss_on_subset_fixed(
+                logits_b_aux,
+                targets,
+                m_b,
+                self.criterion_b_aux,
             )
             self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
             loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux

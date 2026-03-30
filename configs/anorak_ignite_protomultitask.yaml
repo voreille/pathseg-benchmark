@@ -36,6 +36,7 @@ model:
     support_every_n_steps: 10
     refresh_support_on_val: false
     num_classes_b: 7
+    use_fixed_loss_weight_b: 1.0
     network:
       class_path: pathseg.models.compartment_prototype_decoder.TumorOnlyPrototypeDecoderRefined
       init_args:
