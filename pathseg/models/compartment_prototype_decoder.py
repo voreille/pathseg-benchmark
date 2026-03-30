@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pathseg.models.encoder import Encoder
+from pathseg.models.refiner_layers import ProtoProjLite
 
 
 class _PrototypeDecoderBase(Encoder):
@@ -935,7 +936,6 @@ class CompartmentPrototypeDecoderStructured(CompartmentPrototypeDecoderRefined):
         *,
         compartment_ignore_index: int = 255,
     ) -> dict[str, torch.Tensor]:
-
         self._validate_support_tensors(support_images, pattern_targets)
 
         device = self.pixel_mean.device
@@ -1022,7 +1022,6 @@ class CompartmentPrototypeDecoderStructured(CompartmentPrototypeDecoderRefined):
         probs_a: torch.Tensor,
         ctx: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         prototypes = ctx["prototypes"]
         label_ids = ctx["label_ids"]
         comp_ids = ctx["compartment_ids"]
@@ -1129,7 +1128,7 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
 
         # --- heads ---
         self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, 1)
-        self.proto_proj = ProtoProj(self.embed_dim, proto_dim, depth=2)
+        self.proto_proj = ProtoProjLite(self.embed_dim, proto_dim, hidden_dim=proto_dim)
         if use_aux_b_head:
             self.head_b_aux = nn.Conv2d(self.embed_dim, self.num_classes_b, 1)
         else:
