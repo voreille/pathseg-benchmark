@@ -16,6 +16,7 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardInde
 
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
+from pathseg.training.histo_loss import CrossEntropyDiceLoss
 
 
 class TwoHeadSemantic(LightningModule):
@@ -87,8 +88,14 @@ class TwoHeadSemantic(LightningModule):
             else None
         )
 
-        self.criterion_a = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_a)
-        self.criterion_b = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_b)
+        # self.criterion_a = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_a)
+        # self.criterion_b = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_b)
+        self.criterion_a = CrossEntropyDiceLoss(
+            ignore_index=self.ignore_idx, weight=w_a
+        )
+        self.criterion_b = CrossEntropyDiceLoss(
+            ignore_index=self.ignore_idx, weight=w_b
+        )
 
     def _select(self, x, idx: torch.Tensor):
         """
@@ -138,8 +145,10 @@ class TwoHeadSemantic(LightningModule):
             logits_a, logits_b = out
 
         # bring both heads to same spatial size
-        logits_a = F.interpolate(logits_a, self.img_size, mode="bilinear")
-        logits_b = F.interpolate(logits_b, self.img_size, mode="bilinear")
+        if logits_a.shape[-2:] != self.img_size:
+            logits_a = F.interpolate(logits_a, self.img_size, mode="bilinear")
+        if logits_b.shape[-2:] != self.img_size:
+            logits_b = F.interpolate(logits_b, self.img_size, mode="bilinear")
 
         m_a = source_ids == self.source_id_a
         m_b = source_ids == self.source_id_b

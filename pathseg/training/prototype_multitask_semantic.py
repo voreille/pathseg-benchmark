@@ -37,6 +37,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
         class_weights_b: Optional[Sequence[float]] = None,
         loss_weight_a: float = 1.0,
         loss_weight_b: float = 1.0,
+        loss_weight_b_aux: float = 1.0,
         support_every_n_steps: int = 1,
         refresh_support_on_val: bool = False,
         num_classes_b: Optional[int] = None,
@@ -58,6 +59,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
         self.source_id_b = int(source_id_b)
         self.loss_weight_a = float(loss_weight_a)
         self.loss_weight_b = float(loss_weight_b)
+        self.loss_weight_b_aux = float(loss_weight_b_aux)
         self.support_every_n_steps = int(support_every_n_steps)
         self.refresh_support_on_val = bool(refresh_support_on_val)
 
@@ -393,7 +395,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
     # Training / eval
     # ------------------------------------------------------------------
     def _get_loss_weight_b(self):
-
         step = self.global_step
 
         warmup_start = 1000
@@ -445,6 +446,19 @@ class TwoHeadSemanticWithSupport(LightningModule):
             )
             loss_b = self._loss_on_subset_proto(logits_b, label_ids_b, targets, m_b)
             loss_total = self.loss_weight_a * loss_a + w_b * loss_b
+
+        if out.get("logits_b_aux") is not None and m_b.any():
+            logits_b_aux = F.interpolate(
+                out["logits_b_aux"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            loss_b_aux = self._loss_on_subset_proto(
+                logits_b_aux, label_ids_b, targets, m_b
+            )
+            self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
+            loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux
 
         self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
         self.log("train_loss_a", loss_a, sync_dist=True)
@@ -877,6 +891,19 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
                 subset_mask=m_b,
             )
             loss_total = self.loss_weight_a * loss_a + w_b * loss_b
+
+        if out.get("logits_b_aux") is not None and m_b.any():
+            logits_b_aux = F.interpolate(
+                out["logits_b_aux"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            loss_b_aux = self._loss_on_subset_proto(
+                logits_b_aux, label_ids_b, targets, m_b
+            )
+            self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
+            loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux
 
         self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
         self.log("train_loss_a", loss_a, sync_dist=True)

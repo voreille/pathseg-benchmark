@@ -1103,6 +1103,7 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
         temperature_init: float = 20.0,
         learnable_temp: bool = False,
         eps: float = 1e-6,
+        use_aux_b_head: bool = False,
     ):
         super().__init__(
             encoder_id=encoder_id,
@@ -1129,6 +1130,10 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
         # --- heads ---
         self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, 1)
         self.proto_proj = ProtoProj(self.embed_dim, proto_dim, depth=2)
+        if use_aux_b_head:
+            self.head_b_aux = nn.Conv2d(self.embed_dim, self.num_classes_b, 1)
+        else:
+            self.head_b_aux = None
 
         # temperature
         if learnable_temp:
@@ -1162,6 +1167,10 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
             "logits_a": logits_a,
             "probs_a": probs_a,
         }
+
+        if self.head_b_aux is not None:
+            logits_b_aux = self.head_b_aux(feat)
+            out["logits_b_aux"] = logits_b_aux
 
         if ctx is None:
             return out

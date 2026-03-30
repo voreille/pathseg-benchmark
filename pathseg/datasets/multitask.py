@@ -94,6 +94,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         num_workers: int = 0,
         img_size: tuple[int, int] = (448, 448),
         batch_size: int = 1,
+        val_batch_size: int = 1,
         scale_range: tuple[float, float] = (0.8, 1.2),
         ignore_idx: int = 255,
         prefetch_factor: int = 2,
@@ -119,6 +120,8 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self.datasets_cfg = datasets
         self.epoch_repeat = int(epoch_repeat)
         self.return_background_mask = bool(return_background_mask)
+        self.val_dataloader_kwargs = self.dataloader_kwargs.copy()
+        self.val_dataloader_kwargs["batch_size"] = val_batch_size
 
         self.save_hyperparameters(ignore=["transforms", "val_transforms"])
 
@@ -325,13 +328,13 @@ class MultiTaskConcatDataModule(LightningDataModule):
     def val_dataloader(self):
         # one loader per dataset to keep metrics separate if you want
         return [
-            DataLoader(ds, collate_fn=self.eval_collate, **self.dataloader_kwargs)
+            DataLoader(ds, collate_fn=self.eval_collate, **self.val_dataloader_kwargs)
             for _, ds in self.val_wrapped
         ]
 
     def test_dataloader(self):
         return [
-            DataLoader(ds, collate_fn=self.eval_collate, **self.dataloader_kwargs)
+            DataLoader(ds, collate_fn=self.eval_collate, **self.val_dataloader_kwargs)
             for _, ds in self.test_wrapped
         ]
 
@@ -342,7 +345,9 @@ class MultiTaskConcatDataModule(LightningDataModule):
         loaders, splits = [], []
         for split_name, ds in self.predict_wrapped:
             loaders.append(
-                DataLoader(ds, collate_fn=self.eval_collate, **self.dataloader_kwargs)
+                DataLoader(
+                    ds, collate_fn=self.eval_collate, **self.val_dataloader_kwargs
+                )
             )
             splits.append(split_name)
 

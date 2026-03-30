@@ -1,9 +1,9 @@
 trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
-  val_check_interval: 1000
+  val_check_interval: 4000
   check_val_every_n_epoch: null
-  accumulate_grad_batches: 1
+  accumulate_grad_batches: 4
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -11,7 +11,7 @@ trainer:
       group: ANORAK
       job_type: baseline
       tags:
-        ["baseline", "wahoo", "20x", "896x896", "ANORAK+IGNITE", "multitask"]
+        ["baseline", "wahoo", "20x", "896x896", "ANORAK+IGNITE", "multitask", "UNETR-like"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
@@ -22,7 +22,8 @@ model:
     source_id_b: 1
     num_metrics: 2
     network:
-      class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
+      class_path: pathseg.models.multitask_unetr.TwoHeadViTPyramidSeg
+      # class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
       init_args:
         encoder_id: "h0-mini"
         num_classes_a: 16
@@ -56,19 +57,20 @@ data:
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0
-    batch_size: 16
+    batch_size: 4
     epoch_repeat: 30
     transforms:
-      class_path: pathseg.datasets.transforms.HistoTransforms
+      # class_path: pathseg.datasets.transforms.HistoTransforms
+      class_path: pathseg.datasets.transforms.CustomTransforms
       init_args:
         img_size: [896, 896]
         scale_range: [0.8, 1.2]
-        hed_p: 0.3
-        hed_h_shift_limit: 0.02
-        hed_e_shift_limit: 0.02
-        hsv_p: 0.1
-        hsv_hue_shift_limit: 0.02
-        hsv_sat_scale_limit: 0.05
-        hsv_val_scale_limit: 0.05
-        max_brightness_delta: 16
-        max_contrast_factor: 0.15
+        # hed_p: 0.3
+        # hed_h_shift_limit: 0.02
+        # hed_e_shift_limit: 0.02
+        # hsv_p: 0.1
+        # hsv_hue_shift_limit: 0.02
+        # hsv_sat_scale_limit: 0.05
+        # hsv_val_scale_limit: 0.05
+        # max_brightness_delta: 16
+        # max_contrast_factor: 0.15

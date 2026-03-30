@@ -40,6 +40,7 @@ model:
       class_path: pathseg.models.compartment_prototype_decoder.TumorOnlyPrototypeDecoderRefined
       init_args:
         encoder_id: "h0-mini"
+        use_aux_b_head: true
         img_size: [896, 896]
         num_compartments: 16
         num_classes_b: 7
@@ -70,7 +71,7 @@ data:
         split_csv: "metadata.csv"
         source_id: 0
         num_classes: 16
-        sampling_weight: 2.0
+        sampling_weight: 1.0
 
       - name: ANORAK
         root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
