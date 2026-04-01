@@ -302,21 +302,20 @@ class TumorOnlyPrototypeDecoderRefined(Encoder):
 
 class CompartmentPrototypeDecoder(Encoder):
     """
-    Prototype decoder with one prototype per (pattern class, compartment).
+    Compartment-first prototype decoder.
 
-    Forward returns:
-      - logits_a: [B, num_compartments, H, W]
-      - logits_b: [B, num_classes_b, H, W]   # global class space
-      - label_ids_b: [K']                    # labels supported by current episode
-      - pair_label_ids_b: [P]                # one per prototype pair
-      - compartment_ids_b: [P]               # one per prototype pair
+    Head A:
+        predicts tissue compartments.
 
-    Design:
-      - class 0 is background for head B
-      - prototypes are built only for foreground classes
-      - background is not explicitly modeled by prototypes
-      - unsupported foreground classes get a very low logit
-      - background gets a neutral baseline logit of 0
+    Head B:
+        uses a compartment-wise prototype bank.
+        For each selected compartment c:
+            - foreground class prototypes (k, c) are fitted if overlap is high enough
+            - one background prototype (0, c) is also fitted
+
+    Background logit is composed of:
+        1) background prototypes inside selected compartments
+        2) bias from unselected compartments via head A probabilities
     """
 
     def __init__(
@@ -338,7 +337,7 @@ class CompartmentPrototypeDecoder(Encoder):
         use_aux_b_head: bool = False,
         allowed_compartments: list[int] | None = None,
         compartment_threshold: float = 0.2,
-        max_compartments_per_class: int | None = 2,
+        bg_unselected_scale: float = 1.0,
     ):
         super().__init__(
             encoder_id=encoder_id,
@@ -355,7 +354,7 @@ class CompartmentPrototypeDecoder(Encoder):
         self.eps = float(eps)
 
         self.compartment_threshold = float(compartment_threshold)
-        self.max_compartments_per_class = max_compartments_per_class
+        self.bg_unselected_scale = float(bg_unselected_scale)
 
         if allowed_compartments is None:
             allowed_compartments = list(range(self.num_compartments))
@@ -392,66 +391,19 @@ class CompartmentPrototypeDecoder(Encoder):
     def forward_features_map(self, x: torch.Tensor) -> torch.Tensor:
         return self._tokens_to_map(super().forward(x))
 
-    def _aggregate_pair_logits_to_local_class_logits(
-        self,
-        pair_logits: torch.Tensor,  # [B, P, H, W]
-        pair_label_ids: torch.Tensor,  # [P]
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if pair_logits.ndim != 4:
-            raise ValueError(
-                f"pair_logits must have shape [B,P,H,W], got {tuple(pair_logits.shape)}"
-            )
-        if pair_label_ids.ndim != 1:
-            raise ValueError(
-                f"pair_label_ids must have shape [P], got {tuple(pair_label_ids.shape)}"
-            )
-        if pair_logits.shape[1] != pair_label_ids.numel():
-            raise ValueError("pair_logits.shape[1] must match pair_label_ids.numel()")
-
-        label_ids_b = torch.unique(pair_label_ids, sorted=True)
-        b, _, h, w = pair_logits.shape
-        logits_local = pair_logits.new_zeros((b, label_ids_b.numel(), h, w))
-
-        for local_idx, global_label in enumerate(label_ids_b.tolist()):
-            mask = pair_label_ids == int(global_label)
-            logits_local[:, local_idx] = pair_logits[:, mask].sum(dim=1)
-
-        return logits_local, label_ids_b
-
-    def _expand_local_to_global_logits(
-        self,
-        logits_local: torch.Tensor,  # [B, K', H, W]
-        label_ids_b: torch.Tensor,  # [K']
-    ) -> torch.Tensor:
-        """
-        Expand episodic local logits to global class space.
-
-        Convention:
-          - background channel 0 is always available with neutral logit 0
-          - unsupported foreground classes get a very low logit
-        """
-        b, _, h, w = logits_local.shape
-        logits_global = logits_local.new_full(
-            (b, self.num_classes_b, h, w),
-            -1e4,
-        )
-        logits_global[:, 0, :, :] = 0.0
-
-        if label_ids_b.numel() > 0:
-            logits_global[:, label_ids_b, :, :] = logits_local
-
-        return logits_global
-
-    # --------------------------------------------------------
-    # forward
-    # --------------------------------------------------------
-    def forward(
-        self,
-        x: torch.Tensor,
-        ctx: dict[str, torch.Tensor] | None = None,
+    def _empty_ctx(
+        self, device: torch.device, proto_dim: int
     ) -> dict[str, torch.Tensor]:
-        feat = self.forward_features_map(x)
+        return {
+            "selected_compartments": torch.empty(0, dtype=torch.long, device=device),
+            "compartment_offsets": torch.zeros(1, dtype=torch.long, device=device),
+            "prototypes": torch.empty(0, proto_dim, device=device),
+            "label_ids": torch.empty(0, dtype=torch.long, device=device),
+            "compartment_ids": torch.empty(0, dtype=torch.long, device=device),
+        }
 
+    def forward(self, x: torch.Tensor, ctx: dict[str, torch.Tensor] | None = None):
+        feat = self.forward_features_map(x)
         logits_a = self.head_a(feat)
         probs_a = F.softmax(logits_a, dim=1)
 
@@ -467,62 +419,60 @@ class CompartmentPrototypeDecoder(Encoder):
         if ctx is None:
             return out
 
-        pair_label_ids = ctx["label_ids"]
-        pair_compartment_ids = ctx["compartment_ids"]
+        b, _, h, w = feat.shape
+        logits_b = feat.new_full((b, self.num_classes_b, h, w), -1e4)
+        logits_b[:, 0, :, :] = 0.0
 
-        # empty episode -> only background available
         if ctx["prototypes"].numel() == 0:
-            b, _, h, w = feat.shape
-            logits_b = feat.new_full((b, self.num_classes_b, h, w), -1e4)
-            logits_b[:, 0, :, :] = 0.0
-
             out["logits_b"] = logits_b
             out["label_ids_b"] = torch.empty(0, dtype=torch.long, device=feat.device)
-            out["pair_label_ids_b"] = pair_label_ids
-            out["compartment_ids_b"] = pair_compartment_ids
+            out["pair_label_ids_b"] = ctx["label_ids"]
+            out["compartment_ids_b"] = ctx["compartment_ids"]
             return out
 
-        # prototype branch should not backprop through encoder or head A
-        # proto_feat = self.proto_proj(feat.detach())
-        proto_feat = self.proto_proj(feat)
+        proto_feat = self.proto_proj(feat.detach())
 
         if ctx.get("center") is not None:
             proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
 
         proto_feat = F.normalize(proto_feat, dim=1)
 
-        # similarity to each retained (class, compartment) prototype
-        # [B, P, H, W]
         pair_logits = torch.einsum("bdhw,pd->bphw", proto_feat, ctx["prototypes"])
         pair_logits = pair_logits * torch.exp(self.log_temp)
 
-        # gate each pair by detached head A compartment probability
         probs_a_for_b = probs_a.detach()
-        comp_probs = probs_a_for_b[:, pair_compartment_ids, :, :]
+        comp_probs = probs_a_for_b[:, ctx["compartment_ids"], :, :]  # [B,P,H,W]
         pair_logits = pair_logits * comp_probs
 
-        # aggregate pair logits -> episodic class logits
-        logits_local, label_ids_b = self._aggregate_pair_logits_to_local_class_logits(
-            pair_logits=pair_logits,
-            pair_label_ids=pair_label_ids,
-        )
+        for p, lab in enumerate(ctx["label_ids"].tolist()):
+            logits_b[:, int(lab), :, :] = (
+                logits_b[:, int(lab), :, :] + pair_logits[:, p]
+            )
 
-        # episodic -> global class space
-        logits_b_global = self._expand_local_to_global_logits(
-            logits_local=logits_local,
-            label_ids_b=label_ids_b,
+        # bg bias from unselected compartments
+        selected_mask = torch.zeros(
+            self.num_compartments,
+            dtype=torch.bool,
+            device=feat.device,
         )
+        if ctx["selected_compartments"].numel() > 0:
+            selected_mask[ctx["selected_compartments"]] = True
 
-        out["pair_logits_b"] = pair_logits
-        out["logits_b"] = logits_b_global
-        out["label_ids_b"] = label_ids_b
-        out["pair_label_ids_b"] = pair_label_ids
-        out["compartment_ids_b"] = pair_compartment_ids
+        all_compartments = torch.arange(self.num_compartments, device=feat.device)
+        unselected_compartments = all_compartments[~selected_mask]
+
+        if unselected_compartments.numel() > 0:
+            bg_bias = probs_a_for_b[:, unselected_compartments, :, :].sum(dim=1)
+            logits_b[:, 0, :, :] = (
+                logits_b[:, 0, :, :] + self.bg_unselected_scale * bg_bias
+            )
+
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = torch.unique(ctx["label_ids"], sorted=True)
+        out["pair_label_ids_b"] = ctx["label_ids"]
+        out["compartment_ids_b"] = ctx["compartment_ids"]
         return out
 
-    # --------------------------------------------------------
-    # prototype fitting
-    # --------------------------------------------------------
     @torch.no_grad()
     def fit_prototypes(
         self,
@@ -567,82 +517,73 @@ class CompartmentPrototypeDecoder(Encoder):
             dtype=torch.long,
         )
 
-        prototypes: list[torch.Tensor] = []
-        label_ids: list[int] = []
-        compartment_ids: list[int] = []
+        prototypes_list: list[torch.Tensor] = []
+        label_ids_list: list[int] = []
+        compartment_ids_list: list[int] = []
+        selected_compartments: list[int] = []
 
-        # skip background class 0
-        for k in range(1, k_total):
-            patt_k = patt_flat[:, k]  # [S,N]
-            patt_mass = patt_k.sum()
-            if patt_mass <= self.eps:
+        for c in allowed_comp_ids.tolist():
+            comp_c = comp_flat[:, int(c)]  # [S,N]
+            comp_mass = comp_c.sum()
+
+            if comp_mass <= self.eps:
                 continue
 
-            # how much class-k overlaps each allowed compartment
-            overlap = (patt_k.unsqueeze(1) * comp_flat[:, allowed_comp_ids]).sum(
-                dim=(0, 2)
-            )
-            overlap = overlap / patt_mass.clamp_min(self.eps)
+            found_any_for_this_compartment = False
 
-            valid_local = torch.nonzero(
-                overlap >= self.compartment_threshold,
-                as_tuple=False,
-            ).flatten()
+            for k in range(k_total):  # includes bg class 0
+                patt_k = patt_flat[:, int(k)]  # [S,N]
 
-            # fallback: keep best compartment
-            if valid_local.numel() == 0:
-                valid_local = torch.tensor(
-                    [int(torch.argmax(overlap).item())],
-                    device=device,
-                    dtype=torch.long,
-                )
+                overlap_k = (patt_k * comp_c).sum() / comp_mass.clamp_min(self.eps)
+                if overlap_k <= self.compartment_threshold:
+                    continue
 
-            if (
-                self.max_compartments_per_class is not None
-                and valid_local.numel() > int(self.max_compartments_per_class)
-            ):
-                vals = overlap[valid_local]
-                top_idx = torch.topk(
-                    vals,
-                    k=int(self.max_compartments_per_class),
-                    largest=True,
-                ).indices
-                valid_local = valid_local[top_idx]
-
-            valid_comp_ids = allowed_comp_ids[valid_local]
-
-            for c in valid_comp_ids.tolist():
-                weights = patt_k * comp_flat[:, int(c)]  # [S,N]
+                weights = patt_k * comp_c  # [S,N]
                 weight_sum = weights.sum()
                 if weight_sum <= self.eps:
                     continue
 
+                # weighted mean feature for class k inside compartment c
                 proto_sum = torch.einsum("sn,snd->d", weights, feat_flat)
-                proto = proto_sum / weight_sum.clamp_min(self.eps)
-                proto = F.normalize(proto, dim=0)
+                prototype = proto_sum / weight_sum.clamp_min(self.eps)
+                prototype = F.normalize(prototype, dim=0)
 
-                prototypes.append(proto)
-                label_ids.append(int(k))
-                compartment_ids.append(int(c))
+                prototypes_list.append(prototype)
+                label_ids_list.append(int(k))
+                compartment_ids_list.append(int(c))
+                found_any_for_this_compartment = True
 
-        if len(prototypes) == 0:
+            if found_any_for_this_compartment:
+                selected_compartments.append(int(c))
+
+        if len(prototypes_list) == 0:
             ctx = {
                 "prototypes": torch.empty(0, d, device=device),
                 "label_ids": torch.empty(0, dtype=torch.long, device=device),
                 "compartment_ids": torch.empty(0, dtype=torch.long, device=device),
+                "selected_compartments": torch.empty(
+                    0, dtype=torch.long, device=device
+                ),
             }
             if center is not None:
                 ctx["center"] = center
             return ctx
 
         ctx = {
-            "prototypes": torch.stack(prototypes, dim=0),  # [P,D]
-            "label_ids": torch.tensor(label_ids, dtype=torch.long, device=device),
+            "prototypes": torch.stack(prototypes_list, dim=0),  # [P,D]
+            "label_ids": torch.tensor(
+                label_ids_list, dtype=torch.long, device=device
+            ),  # [P]
             "compartment_ids": torch.tensor(
-                compartment_ids,
+                compartment_ids_list,
                 dtype=torch.long,
                 device=device,
-            ),
+            ),  # [P]
+            "selected_compartments": torch.tensor(
+                selected_compartments,
+                dtype=torch.long,
+                device=device,
+            ),  # [Csel]
         }
         if center is not None:
             ctx["center"] = center

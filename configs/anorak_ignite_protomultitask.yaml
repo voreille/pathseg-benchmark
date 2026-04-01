@@ -47,10 +47,9 @@ model:
         num_classes_b: 7
         proto_dim: 256
         center: true
-        temperature_init: 20.0
+        temperature_init: 5.0
         allowed_compartments: [1, 2, 3, 4, 5, 7, 12]
         compartment_threshold: 0.2
-        max_compartments_per_class: 4
 
     tiler:
       class_path: pathseg.training.tiler.GridPadTiler

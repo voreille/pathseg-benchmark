@@ -13,7 +13,8 @@ from torch.nn.utils import weight_norm as wn
 
 
 class ViTEncoderPyramid(
-        nn.Module):  # TODO: add the rescaling of the pixel mean and std !!
+    nn.Module
+):  # TODO: add the rescaling of the pixel mean and std !!
     """
     Fixed-size ViT/UNI2 adapter:
       - one-time patch/pos-embed surgery in __init__ for (img_size, patch_size)
@@ -49,10 +50,12 @@ class ViTEncoderPyramid(
             pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
 
         # Per-scale 1x1 projections (project BEFORE resize)
-        self.proj = nn.ModuleDict({
-            k: nn.Conv2d(self.D, c, 1, bias=False)
-            for k, c in pyramid_channels.items()
-        })
+        self.proj = nn.ModuleDict(
+            {
+                k: nn.Conv2d(self.D, c, 1, bias=False)
+                for k, c in pyramid_channels.items()
+            }
+        )
 
         # Convenient handles
         self.patch_embed = getattr(self.vit, "patch_embed", None)
@@ -73,14 +76,14 @@ class ViTEncoderPyramid(
                         norm_layer=nn.LayerNorm,
                     )
                     try:
-                        new_mlp.load_state_dict(blk.mlp.state_dict(),
-                                                strict=False)
+                        new_mlp.load_state_dict(blk.mlp.state_dict(), strict=False)
                     except Exception:
                         pass
                     blk.mlp = new_mlp
                 if hasattr(blk, "attn") and hasattr(blk.attn, "proj"):
                     blk.attn.proj = nn.Sequential(
-                        nn.LayerNorm(blk.attn.proj.in_features), blk.attn.proj)
+                        nn.LayerNorm(blk.attn.proj.in_features), blk.attn.proj
+                    )
 
         # If model has a "neck", neutralize it (we only need features)
         if hasattr(self.vit, "neck"):
@@ -96,8 +99,9 @@ class ViTEncoderPyramid(
         if hasattr(self.vit, "patch_embed"):
             pe = self.vit.patch_embed
             # sanity: pretrained patch/grid must be square for resampling helpers
-            if (pe.grid_size[0] != pe.grid_size[1]) or (pe.patch_size[0]
-                                                        != pe.patch_size[1]):
+            if (pe.grid_size[0] != pe.grid_size[1]) or (
+                pe.patch_size[0] != pe.patch_size[1]
+            ):
                 raise ValueError(
                     "Pretrained patch/grid must be square for resample helpers."
                 )
@@ -107,7 +111,8 @@ class ViTEncoderPyramid(
             pe.proj.kernel_size = (self.ps, self.ps)
             pe.proj.stride = (self.ps, self.ps)
             pe.proj.weight = nn.Parameter(
-                resample_patch_embed(pe.proj.weight, [self.ps, self.ps]))
+                resample_patch_embed(pe.proj.weight, [self.ps, self.ps])
+            )
 
             # update grid metadata
             pe.grid_size = self.grid_size
@@ -119,28 +124,25 @@ class ViTEncoderPyramid(
             if self.pos_embed.dim() == 4:
                 # NHWC style
                 pe = resample_abs_pos_embed_nhwc(
-                    self.pos_embed,
-                    [max(self.grid_size),
-                     max(self.grid_size)
-                     ])[:, :self.grid_size[0], :self.grid_size[1], :]
+                    self.pos_embed, [max(self.grid_size), max(self.grid_size)]
+                )[:, : self.grid_size[0], : self.grid_size[1], :]
             else:
                 # [1, num_tokens, D]; handle prefix tokens
-                num_prefix_tokens = getattr(self.vit, "num_prefix_tokens",
-                                            1 if self.has_cls else 0)
+                num_prefix_tokens = getattr(
+                    self.vit, "num_prefix_tokens", 1 if self.has_cls else 0
+                )
                 no_embed_class = getattr(self.vit, "no_embed_class", False)
                 if no_embed_class:
                     num_prefix_tokens = 0
                 pe = resample_abs_pos_embed(
                     self.pos_embed,
-                    [max(self.grid_size),
-                     max(self.grid_size)],
+                    [max(self.grid_size), max(self.grid_size)],
                     num_prefix_tokens=num_prefix_tokens,
                 )
                 prefix = pe[:, :num_prefix_tokens, :]
                 grid = pe[:, num_prefix_tokens:, :]
-                grid = grid.reshape(1, max(self.grid_size),
-                                    max(self.grid_size), -1)
-                grid = grid[:, :self.grid_size[0], :self.grid_size[1], :]
+                grid = grid.reshape(1, max(self.grid_size), max(self.grid_size), -1)
+                grid = grid[:, : self.grid_size[0], : self.grid_size[1], :]
                 pe = torch.cat([prefix, grid.flatten(1, 2)], dim=1)
             # set once; from now on, just use it in forward
             self.vit.pos_embed = nn.Parameter(pe)
@@ -150,16 +152,14 @@ class ViTEncoderPyramid(
         # For plain ViTs/UNI2 this is usually not needed.
 
     # ---- helpers ----
-    def _prepare_tokens(self,
-                        x: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
+    def _prepare_tokens(self, x: torch.Tensor) -> Tuple[torch.Tensor, int, int]:
         # Tokenize
         x = self.vit.patch_embed(x)  # [B, D, Ht, Wt]
         B, D, Ht, Wt = x.shape
         tok = x.flatten(2).transpose(1, 2)  # [B, Ht*Wt, D]
 
         # Add prefix tokens (CLS + register tokens) if present
-        num_reg = self.n_reg if getattr(self.vit, "reg_token",
-                                        None) is not None else 0
+        num_reg = self.n_reg if getattr(self.vit, "reg_token", None) is not None else 0
         if getattr(self.vit, "cls_token", None) is not None:
             cls = self.vit.cls_token.expand(B, -1, -1)  # [B,1,D]
             if num_reg > 0:
@@ -175,13 +175,11 @@ class ViTEncoderPyramid(
         tok = self.pos_drop(tok)
         return tok, Ht, Wt
 
-    def _tokens_to_map(self, tokens: torch.Tensor, Ht: int,
-                       Wt: int) -> torch.Tensor:
+    def _tokens_to_map(self, tokens: torch.Tensor, Ht: int, Wt: int) -> torch.Tensor:
         # drop CLS + register tokens → [B, Ht*Wt, D] → [B, D, Ht, Wt]
         start = 1 if self.has_cls else 0
-        num_reg = self.n_reg if getattr(self.vit, "reg_token",
-                                        None) is not None else 0
-        spatial = tokens[:, start + num_reg:, :]  # [B, Ht*Wt, D]
+        num_reg = self.n_reg if getattr(self.vit, "reg_token", None) is not None else 0
+        spatial = tokens[:, start + num_reg :, :]  # [B, Ht*Wt, D]
         return spatial.transpose(1, 2).reshape(tokens.size(0), self.D, Ht, Wt)
 
     # ---- forward ----
@@ -203,23 +201,22 @@ class ViTEncoderPyramid(
             "s4": extracted[0],
             "s8": extracted[1],
             "s16": extracted[2],
-            "s32": extracted[3]
+            "s32": extracted[3],
         }
         target = {
             "s4": (H // 4, W // 4),
             "s8": (H // 8, W // 8),
             "s16": (H // 16, W // 16),
-            "s32": (H // 32, W // 32)
+            "s32": (H // 32, W // 32),
         }
 
         out: Dict[str, torch.Tensor] = {}
         for k, t in layer_to_scale.items():
             fmap = self._tokens_to_map(t, Ht, Wt)  # [B,D,Ht,Wt]
             fmap = self.proj[k](fmap)  # D -> C_k
-            out[k] = F.interpolate(fmap,
-                                   size=target[k],
-                                   mode="bilinear",
-                                   align_corners=False)
+            out[k] = F.interpolate(
+                fmap, size=target[k], mode="bilinear", align_corners=False
+            )
         return out
 
 
@@ -242,14 +239,16 @@ class ViTEncoderPyramidHooks(nn.Module):
     """
 
     def __init__(
-            self,
-            vit: nn.Module,
-            extract_layers: Optional[Iterable[int]] = None,  # 1-based indices
-            has_cls: bool = True,
-            embed_dim: Optional[
-                int] = None,  # auto if None: vit.embed_dim or vit.num_features
-            pyramid_channels: Optional[Dict[
-                str, int]] = None,  # per-scale channels (tapered)
+        self,
+        vit: nn.Module,
+        extract_layers: Optional[Iterable[int]] = None,  # 1-based indices
+        has_cls: bool = True,
+        embed_dim: Optional[
+            int
+        ] = None,  # auto if None: vit.embed_dim or vit.num_features
+        pyramid_channels: Optional[
+            Dict[str, int]
+        ] = None,  # per-scale channels (tapered)
     ):
 
         super().__init__()
@@ -257,8 +256,12 @@ class ViTEncoderPyramidHooks(nn.Module):
         self.vit = vit
         if extract_layers is None:
             last_layer = len(getattr(vit, "blocks", []))
-            extract_layers = (last_layer // 4, last_layer // 2,
-                              3 * last_layer // 4, last_layer)
+            extract_layers = (
+                last_layer // 4,
+                last_layer // 2,
+                3 * last_layer // 4,
+                last_layer,
+            )
 
         self.layers = tuple(extract_layers)
         self.has_cls = has_cls
@@ -266,8 +269,7 @@ class ViTEncoderPyramidHooks(nn.Module):
         if hasattr(vit, "patch_embed"):
             self.patch_size = vit.patch_embed.patch_size
         else:
-            raise ValueError(
-                "vit.patch_embed not found; cannot infer patch size.")
+            raise ValueError("vit.patch_embed not found; cannot infer patch size.")
 
         if hasattr(vit, "num_prefix_tokens"):
             self.num_prefix_tokens = vit.num_prefix_tokens
@@ -284,7 +286,8 @@ class ViTEncoderPyramidHooks(nn.Module):
                 embed_dim = getattr(vit, "num_features", None)
         if embed_dim is None:
             raise ValueError(
-                "Couldn't infer embed_dim; please pass embed_dim explicitly.")
+                "Couldn't infer embed_dim; please pass embed_dim explicitly."
+            )
         self.D = int(embed_dim)
 
         # default tapered channel schedule (edit as you like)
@@ -293,10 +296,12 @@ class ViTEncoderPyramidHooks(nn.Module):
         self.pyramid_channels = pyramid_channels
 
         # 1x1 projections per scale (project BEFORE resize for efficiency)
-        self.proj = nn.ModuleDict({
-            k: nn.Conv2d(self.D, c, 1, bias=False)
-            for k, c in self.pyramid_channels.items()
-        })
+        self.proj = nn.ModuleDict(
+            {
+                k: nn.Conv2d(self.D, c, 1, bias=False)
+                for k, c in self.pyramid_channels.items()
+            }
+        )
 
         # storage for hooked tensors: index -> tokens [B, N, D]
         self._stash: Dict[int, torch.Tensor] = {}
@@ -308,16 +313,14 @@ class ViTEncoderPyramidHooks(nn.Module):
                 "vit.blocks not found; this adapter expects a timm-style ViT with .blocks"
             )
         depth = len(blocks)
-        self._handles: List[torch.utils.hooks.RemovableHandle] = [
-        ]  # type: ignore
+        self._handles: List[torch.utils.hooks.RemovableHandle] = []  # type: ignore
         for idx in self.layers:
             i = idx - 1
             if not (0 <= i < depth):
                 raise ValueError(
                     f"extract_layers has out-of-range index {idx} for depth {depth}"
                 )
-            self._handles.append(blocks[i].register_forward_hook(
-                self._make_hook(i)))
+            self._handles.append(blocks[i].register_forward_hook(self._make_hook(i)))
 
     # ----- hooks -----
     def _make_hook(self, idx: int):
@@ -335,18 +338,17 @@ class ViTEncoderPyramidHooks(nn.Module):
             h.remove()
         self._handles = []
 
-    def _tokens_to_map(self, tokens: torch.Tensor, Ht: int,
-                       Wt: int) -> torch.Tensor:
+    def _tokens_to_map(self, tokens: torch.Tensor, Ht: int, Wt: int) -> torch.Tensor:
         """
         tokens: [B, N, D] including extra tokens (cls/reg if present)
         returns: [B, D, Ht, Wt]
         """
         B, N, D = tokens.shape
-        spatial = tokens[:, self.num_prefix_tokens:, :]  # drop extra tokens
+        spatial = tokens[:, self.num_prefix_tokens :, :]  # drop extra tokens
         Nsp = spatial.shape[1]
         if Nsp != Ht * Wt:
             raise RuntimeError(
-                f"Token count {Nsp} != Ht*Wt ({Ht*Wt}). "
+                f"Token count {Nsp} != Ht*Wt ({Ht * Wt}). "
                 "Pad input to multiples of patch size or handle custom PatchEmbed."
             )
         fmap = spatial.transpose(1, 2).reshape(B, D, Ht, Wt)
@@ -366,25 +368,23 @@ class ViTEncoderPyramidHooks(nn.Module):
         for idx in self.layers:
             t = self._stash.get(idx - 1)
             if t is None:
-                raise RuntimeError(
-                    f"Hook for block {idx} didn't capture output.")
+                raise RuntimeError(f"Hook for block {idx} didn't capture output.")
             captured.append(t)
         if len(captured) != 4:
             raise RuntimeError(
-                f"Expected 4 layers, got {len(captured)}. Got {self.layers}")
+                f"Expected 4 layers, got {len(captured)}. Got {self.layers}"
+            )
 
         assign = {
             "s4": captured[0],
             "s8": captured[1],
             "s16": captured[2],
-            "s32": captured[3]
+            "s32": captured[3],
         }
 
         # target sizes from token grid (exact)
         target = {
-            "s32":
-            (Ht,
-             Wt),  # 1/32 of image for ps=16; for ps=14 this equals token grid
+            "s32": (Ht, Wt),
             "s16": (Ht * 2, Wt * 2),
             "s8": (Ht * 4, Wt * 4),
             "s4": (Ht * 8, Wt * 8),
@@ -395,10 +395,9 @@ class ViTEncoderPyramidHooks(nn.Module):
         for k, tok in assign.items():
             fmap = self._tokens_to_map(tok, Ht, Wt)  # [B, D, Ht, Wt]
             fmap = self.proj[k](fmap)  # D -> C_k
-            out[k] = F.interpolate(fmap,
-                                   size=target[k],
-                                   mode="bilinear",
-                                   align_corners=False)
+            out[k] = F.interpolate(
+                fmap, size=target[k], mode="bilinear", align_corners=False
+            )
         return out
 
 
@@ -433,14 +432,14 @@ class ResNetPyramidAdapter(nn.Module):
         self.pyramid_channels = dict(pyramid_channels)
 
         in_ch = {"s4": 256, "s8": 512, "s16": 1024, "s32": 2048}
-        self.proj = nn.ModuleDict({
-            k:
-            nn.Conv2d(in_ch[k],
-                      self.pyramid_channels[k],
-                      kernel_size=1,
-                      bias=False)
-            for k in ("s4", "s8", "s16", "s32")
-        })
+        self.proj = nn.ModuleDict(
+            {
+                k: nn.Conv2d(
+                    in_ch[k], self.pyramid_channels[k], kernel_size=1, bias=False
+                )
+                for k in ("s4", "s8", "s16", "s32")
+            }
+        )
 
     def _forward_stem(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone.conv1(x)
@@ -468,12 +467,13 @@ class ResNetPyramidAdapter(nn.Module):
 
         return {"s4": s4, "s8": s8, "s16": s16, "s32": s32}
 
+
 def convify_trunk(linear_trunk: nn.Sequential) -> nn.Sequential:
     conv_layers = []
     for m in linear_trunk:
         if isinstance(m, nn.Linear):
             # Check if weight_norm is used on this Linear
-            uses_wn = hasattr(m, 'weight_g') and hasattr(m, 'weight_v')
+            uses_wn = hasattr(m, "weight_g") and hasattr(m, "weight_v")
             conv = nn.Conv2d(
                 in_channels=m.in_features,
                 out_channels=m.out_features,
@@ -486,10 +486,14 @@ def convify_trunk(linear_trunk: nn.Sequential) -> nn.Sequential:
             with torch.no_grad():
                 # copy weights (note: for weight_norm, assign to .weight_v / .weight_g)
                 if uses_wn:
-                    conv.weight_v.copy_(m.weight_v.view(m.out_features, m.in_features, 1, 1))
+                    conv.weight_v.copy_(
+                        m.weight_v.view(m.out_features, m.in_features, 1, 1)
+                    )
                     conv.weight_g.copy_(m.weight_g)
                 else:
-                    conv.weight.copy_(m.weight.view(m.out_features, m.in_features, 1, 1))
+                    conv.weight.copy_(
+                        m.weight.view(m.out_features, m.in_features, 1, 1)
+                    )
                     if m.bias is not None:
                         conv.bias.copy_(m.bias)
                 if (not uses_wn) and m.bias is not None:
@@ -503,7 +507,7 @@ def convify_trunk(linear_trunk: nn.Sequential) -> nn.Sequential:
                 eps=m.eps,
                 momentum=m.momentum,
                 affine=m.affine,
-                track_running_stats=m.track_running_stats
+                track_running_stats=m.track_running_stats,
             )
             with torch.no_grad():
                 if m.affine:
@@ -539,9 +543,10 @@ class MocoResNetPyramidAdapter(nn.Module):
       - Pre-trunk channels: {s4:256, s8:512, s16:1024, s32:2048}.
       - If trunk exists (2048->1024 via 1x1 conv stack), we set s32 input to 1024.
     """
+
     def __init__(
         self,
-        resnet_wrapper: nn.Module,                          # expects .backbone (tv ResNet) and optional .trunk (MLP)
+        resnet_wrapper: nn.Module,  # expects .backbone (tv ResNet) and optional .trunk (MLP)
         pyramid_channels: Optional[Dict[str, int]] = None,
     ):
         super().__init__()
@@ -550,8 +555,12 @@ class MocoResNetPyramidAdapter(nn.Module):
 
         # Optional trunk
         self.trunk: Optional[nn.Sequential] = None
-        if hasattr(resnet_wrapper, "trunk") and isinstance(resnet_wrapper.trunk, nn.Sequential):
-            self.trunk = convify_trunk(resnet_wrapper.trunk)  # 2048 -> 1024 (spatial 1x1 conv stack)
+        if hasattr(resnet_wrapper, "trunk") and isinstance(
+            resnet_wrapper.trunk, nn.Sequential
+        ):
+            self.trunk = convify_trunk(
+                resnet_wrapper.trunk
+            )  # 2048 -> 1024 (spatial 1x1 conv stack)
 
         if pyramid_channels is None:
             pyramid_channels = {"s4": 64, "s8": 128, "s16": 256, "s32": 256}
@@ -561,10 +570,14 @@ class MocoResNetPyramidAdapter(nn.Module):
         s32_in = 1024 if self.trunk is not None else 2048
         in_ch = {"s4": 256, "s8": 512, "s16": 1024, "s32": s32_in}
 
-        self.proj = nn.ModuleDict({
-            k: nn.Conv2d(in_ch[k], self.pyramid_channels[k], kernel_size=1, bias=False)
-            for k in ("s4", "s8", "s16", "s32")
-        })
+        self.proj = nn.ModuleDict(
+            {
+                k: nn.Conv2d(
+                    in_ch[k], self.pyramid_channels[k], kernel_size=1, bias=False
+                )
+                for k in ("s4", "s8", "s16", "s32")
+            }
+        )
 
     def _forward_stem(self, x: torch.Tensor) -> torch.Tensor:
         x = self.backbone.conv1(x)
@@ -583,12 +596,12 @@ class MocoResNetPyramidAdapter(nn.Module):
         c5 = self.backbone.layer4(c4)  # /32  (2048 ch)
 
         if self.trunk is not None:
-            c5 = self.trunk(c5)        # 2048 -> 1024 (spatial 1x1 convs)
+            c5 = self.trunk(c5)  # 2048 -> 1024 (spatial 1x1 convs)
 
         # project to decoder channels
-        s4  = self.proj["s4"](c2)
-        s8  = self.proj["s8"](c3)
+        s4 = self.proj["s4"](c2)
+        s8 = self.proj["s8"](c3)
         s16 = self.proj["s16"](c4)
-        s32 = self.proj["s32"](c5)     # now expects 1024 if trunk exists, else 2048
+        s32 = self.proj["s32"](c5)  # now expects 1024 if trunk exists, else 2048
 
         return {"s4": s4, "s8": s8, "s16": s16, "s32": s32}
