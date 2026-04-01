@@ -49,13 +49,13 @@ support_patient_ids
 
 # %%
 class_id_mapping = {
-    "aca_bd": 0,
-    "aca_md": 1,
-    "aca_pd": 2,
-    "scc_bd": 3,
-    "scc_md": 4,
-    "scc_pd": 5,
-    "nor": 6,
+    "nor": 0,
+    "aca_bd": 1,
+    "aca_md": 2,
+    "aca_pd": 3,
+    "scc_bd": 4,
+    "scc_md": 5,
+    "scc_pd": 6,
 }
 df["label_id"] = df["class_name"].map(class_id_mapping)
 

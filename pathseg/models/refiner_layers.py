@@ -138,7 +138,7 @@ class ProtoProj(nn.Module):
         return x + skip
 
 
-class   ProtoProjLite(nn.Module):
+class ProtoProjLite(nn.Module):
     def __init__(self, in_dim: int, proto_dim: int, hidden_dim: int | None = None):
         super().__init__()
         if hidden_dim is None:

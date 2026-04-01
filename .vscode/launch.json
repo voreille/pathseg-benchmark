@@ -104,18 +104,19 @@
             "args": [
                 "predict",
                 "-c",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/cib6910v/config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/xc78hdbu/config.yaml",
                 "-c",
-                "configs/eval/anorak_ignite.yaml",
+                // "configs/eval/anorak_ignite.yaml",
+                "configs/eval/lunghist700.yaml",
                 "--no_compile",
                 "--ckpt_path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/cib6910v/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/xc78hdbu/epoch=26-step=40000.ckpt",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false

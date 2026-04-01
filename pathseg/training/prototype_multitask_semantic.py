@@ -16,6 +16,7 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardInde
 
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
+from pathseg.training.histo_loss import CrossEntropyDiceLoss
 
 
 class TwoHeadSemanticWithSupport(LightningModule):
@@ -41,6 +42,7 @@ class TwoHeadSemanticWithSupport(LightningModule):
         support_every_n_steps: int = 1,
         refresh_support_on_val: bool = False,
         num_classes_b: Optional[int] = None,
+        use_fixed_loss_weight_b: Optional[float] = None,
     ):
         super().__init__(
             img_size=img_size,
@@ -62,6 +64,11 @@ class TwoHeadSemanticWithSupport(LightningModule):
         self.loss_weight_b_aux = float(loss_weight_b_aux)
         self.support_every_n_steps = int(support_every_n_steps)
         self.refresh_support_on_val = bool(refresh_support_on_val)
+        self.use_fixed_loss_weight_b = (
+            float(use_fixed_loss_weight_b)
+            if use_fixed_loss_weight_b is not None
+            else None
+        )
 
         self.num_classes_a = network.num_compartments
         self.num_classes_b = num_classes_b
@@ -85,8 +92,10 @@ class TwoHeadSemanticWithSupport(LightningModule):
             else None
         )
 
-        self.criterion_a = nn.CrossEntropyLoss(ignore_index=self.ignore_idx, weight=w_a)
-        self.criterion_b_aux = nn.CrossEntropyLoss(
+        self.criterion_a = CrossEntropyDiceLoss(
+            ignore_index=self.ignore_idx, weight=w_a
+        )
+        self.criterion_b_aux = CrossEntropyDiceLoss(
             ignore_index=self.ignore_idx, weight=w_b
         )
 
@@ -350,26 +359,35 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
     def _loss_on_subset_proto(
         self,
-        logits_b: torch.Tensor,
-        label_ids_b: torch.Tensor,
+        logits_b: torch.Tensor,  # [B, num_classes_b, H, W]
+        label_ids_b: torch.Tensor,  # supported labels this episode
         targets_list,
         subset_mask: torch.Tensor,
     ) -> torch.Tensor:
-        if subset_mask.sum().item() == 0 or logits_b.shape[1] == 0:
+        if subset_mask.sum().item() == 0:
             return torch.zeros((), device=logits_b.device)
 
         logits_s = logits_b[subset_mask]
         targets_s = self._select(targets_list, subset_mask)
         targets_pp = self._targets_to_tensor(targets_s, logits_b.device)
-        local_targets = self._remap_targets_to_local_labels(targets_pp, label_ids_b)
+
+        supported = torch.zeros_like(targets_pp, dtype=torch.bool)
+        for lab in label_ids_b.tolist():
+            supported |= targets_pp == int(lab)
+
+        # keep background too
+        supported |= targets_pp == 0
+
+        targets_masked = targets_pp.clone()
+        targets_masked[~supported] = self.ignore_idx
 
         weight = None
         if self.class_weights_b_tensor.numel() > 0:
-            weight = self.class_weights_b_tensor[label_ids_b].to(logits_b.device)
+            weight = self.class_weights_b_tensor.to(logits_b.device)
 
         return F.cross_entropy(
             logits_s,
-            local_targets,
+            targets_masked,
             ignore_index=self.ignore_idx,
             weight=weight,
         )
@@ -416,7 +434,10 @@ class TwoHeadSemanticWithSupport(LightningModule):
         imgs, targets, source_ids, _image_ids = batch
         source_ids = source_ids.to(imgs.device)
 
-        w_b = self._get_loss_weight_b() * self.loss_weight_b
+        if self.use_fixed_loss_weight_b is None:
+            w_b = self._get_loss_weight_b() * self.loss_weight_b
+        else:
+            w_b = float(self.use_fixed_loss_weight_b)
 
         m_a = source_ids == self.source_id_a
         m_b = source_ids == self.source_id_b
@@ -505,22 +526,45 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_out = self(crops, ctx=ctx)
-        crop_logits = self._select_eval_logits(crop_out, sid0)
-        crop_logits = F.interpolate(
-            crop_logits, self.img_size, mode="bilinear", align_corners=False
+        crop_logits_a = crop_out["logits_a"]
+        crop_logits_b = crop_out["logits_b"]
+        crop_logits_a = F.interpolate(
+            crop_logits_a, self.img_size, mode="bilinear", align_corners=False
+        )
+        crop_logits_b = F.interpolate(
+            crop_logits_b, self.img_size, mode="bilinear", align_corners=False
         )
 
-        logits_list = self.revert_window_logits_semantic(
-            crop_logits, origins, img_sizes
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a, origins, img_sizes
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b, origins, img_sizes
         )
 
         targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
-        self.update_metrics(logits_list, targets_pp, dataloader_idx)
+
+        if sid0 == self.source_id_a:
+            self.update_metrics(logits_a_list, targets_pp, dataloader_idx)
+        else:
+            self.update_metrics(logits_b_list, targets_pp, dataloader_idx)
 
         if batch_idx == 0:
-            name = f"{log_prefix}_{dataloader_idx}_pred_{batch_idx}"
-            plot = self.plot_semantic(imgs[0], targets_pp[0], logits=logits_list[0])
-            self.log_wandb_image(name, plot, commit=False)
+            img0 = imgs[0]
+            tgt0 = targets_pp[0]
+
+            plot = self.plot_two_head_semantic(
+                img=img0,
+                logits_a=logits_a_list[0],
+                logits_b=None if logits_b_list is None else logits_b_list[0],
+                target=tgt0,
+                gt_head="a" if sid0 == self.source_id_a else "b",
+            )
+            self.log_wandb_image(
+                f"{log_prefix}_{dataloader_idx}_two_head_{batch_idx}",
+                plot,
+                commit=False,
+            )
 
     def on_validation_epoch_end(self):
         self._on_eval_epoch_end_semantic("val")
@@ -699,6 +743,113 @@ class TwoHeadSemanticWithSupport(LightningModule):
 
         return outs
 
+    @torch.compiler.disable
+    def plot_two_head_semantic(
+        self,
+        img: torch.Tensor,
+        logits_a: torch.Tensor | None = None,
+        logits_b: torch.Tensor | None = None,
+        target: torch.Tensor | None = None,
+        gt_head: str | None = None,
+        cmap: str = "tab20",
+    ):
+        panels = [("Image", "img")]
+        if target is not None:
+            panels.append((f"GT ({gt_head})" if gt_head is not None else "GT", "gt"))
+        if logits_a is not None:
+            panels.append(("Head A", "a"))
+        if logits_b is not None:
+            panels.append(("Head B", "b"))
+
+        ncols = len(panels)
+        fig, axes = plt.subplots(
+            1, ncols, figsize=(5 * ncols, 5), sharex=True, sharey=True
+        )
+        if ncols == 1:
+            axes = [axes]
+
+        img_np = img.detach().cpu().numpy().transpose(1, 2, 0)
+        if img_np.max() > 1.0:
+            img_np = img_np / 255.0
+        img_np = np.clip(img_np, 0, 1)
+
+        target_np = None if target is None else target.detach().cpu().numpy()
+
+        pred_a = None
+        if logits_a is not None:
+            pred_a = torch.argmax(logits_a, dim=0).detach().cpu().numpy()
+
+        pred_b = None
+        if logits_b is not None:
+            pred_b = torch.argmax(logits_b, dim=0).detach().cpu().numpy()
+
+        uniq_parts = []
+        if target_np is not None:
+            uniq_parts.append(np.unique(target_np))
+        if pred_a is not None:
+            uniq_parts.append(np.unique(pred_a))
+        if pred_b is not None:
+            uniq_parts.append(np.unique(pred_b))
+
+        if len(uniq_parts) == 0:
+            unique_classes = np.array([0], dtype=np.int64)
+        else:
+            unique_classes = np.unique(np.concatenate(uniq_parts))
+
+        num_classes = len(unique_classes)
+        colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))
+
+        if self.ignore_idx in unique_classes:
+            ignore_mask = unique_classes == self.ignore_idx
+            colors[ignore_mask] = [0, 0, 0, 1]
+
+        custom_cmap = mcolors.ListedColormap(colors)
+        norm = mcolors.Normalize(vmin=0, vmax=num_classes - 1)
+
+        def encode_mask(x: np.ndarray) -> np.ndarray:
+            return np.digitize(x, unique_classes, right=False) - 1
+
+        for ax, (title, kind) in zip(axes, panels):
+            ax.set_title(title)
+            ax.axis("off")
+
+            if kind == "img":
+                ax.imshow(img_np)
+            elif kind == "gt":
+                ax.imshow(
+                    encode_mask(target_np),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind == "a":
+                ax.imshow(
+                    encode_mask(pred_a),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind == "b":
+                ax.imshow(
+                    encode_mask(pred_b),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+
+        patches = [
+            Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
+            for i in range(num_classes)
+        ]
+        fig.legend(handles=patches, loc="upper left")
+
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, facecolor="black")
+        plt.close(fig)
+        buf.seek(0)
+        return Image.open(buf)
+
 
 class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
     def __init__(
@@ -759,11 +910,11 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
         targets_s = self._select(targets_list, subset_mask)
         targets_pp = self._targets_to_tensor(targets_s, logits_b.device)
 
-        prob_tumor = self._get_tumor_prob(logits_a)[subset_mask]  # [B,H,W]
+        # no grad to head A from loss B
+        prob_tumor = self._get_tumor_prob(logits_a.detach())[subset_mask]
 
         targets_pp = targets_pp.clone()
         targets_pp[targets_pp == 0] = self.ignore_idx
-
         local_targets = self._remap_targets_to_local_labels(targets_pp, label_ids_b)
 
         weight = None
@@ -776,7 +927,7 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
             ignore_index=self.ignore_idx,
             weight=weight,
             reduction="none",
-        )  # [B,H,W]
+        )
 
         loss = loss * prob_tumor
         denom = prob_tumor.sum().clamp_min(1e-6)
@@ -1013,11 +1164,6 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
         else:
             raise ValueError(f"Unexpected predict batch format: len={len(batch)}")
 
-        if torch.is_tensor(imgs):
-            imgs = imgs.to(self.device)
-        else:
-            imgs = torch.stack(list(imgs), dim=0).to(self.device)
-
         img_ids = list(img_ids)
 
         if source_ids is not None:
@@ -1064,113 +1210,3 @@ class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):
             outs.append(out_i)
 
         return outs
-
-    # ------------------------------------------------------------------
-    # Plotting
-    # ------------------------------------------------------------------
-    @torch.compiler.disable
-    def plot_two_head_semantic(
-        self,
-        img: torch.Tensor,
-        logits_a: torch.Tensor | None = None,
-        logits_b: torch.Tensor | None = None,
-        target: torch.Tensor | None = None,
-        gt_head: str | None = None,
-        cmap: str = "tab20",
-    ):
-        panels = [("Image", "img")]
-        if target is not None:
-            panels.append((f"GT ({gt_head})" if gt_head is not None else "GT", "gt"))
-        if logits_a is not None:
-            panels.append(("Head A", "a"))
-        if logits_b is not None:
-            panels.append(("Head B", "b"))
-
-        ncols = len(panels)
-        fig, axes = plt.subplots(
-            1, ncols, figsize=(5 * ncols, 5), sharex=True, sharey=True
-        )
-        if ncols == 1:
-            axes = [axes]
-
-        img_np = img.detach().cpu().numpy().transpose(1, 2, 0)
-        if img_np.max() > 1.0:
-            img_np = img_np / 255.0
-        img_np = np.clip(img_np, 0, 1)
-
-        target_np = None if target is None else target.detach().cpu().numpy()
-
-        pred_a = None
-        if logits_a is not None:
-            pred_a = torch.argmax(logits_a, dim=0).detach().cpu().numpy()
-
-        pred_b = None
-        if logits_b is not None:
-            pred_b = torch.argmax(logits_b, dim=0).detach().cpu().numpy()
-
-        uniq_parts = []
-        if target_np is not None:
-            uniq_parts.append(np.unique(target_np))
-        if pred_a is not None:
-            uniq_parts.append(np.unique(pred_a))
-        if pred_b is not None:
-            uniq_parts.append(np.unique(pred_b))
-
-        if len(uniq_parts) == 0:
-            unique_classes = np.array([0], dtype=np.int64)
-        else:
-            unique_classes = np.unique(np.concatenate(uniq_parts))
-
-        num_classes = len(unique_classes)
-        colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))
-
-        if self.ignore_idx in unique_classes:
-            ignore_mask = unique_classes == self.ignore_idx
-            colors[ignore_mask] = [0, 0, 0, 1]
-
-        custom_cmap = mcolors.ListedColormap(colors)
-        norm = mcolors.Normalize(vmin=0, vmax=num_classes - 1)
-
-        def encode_mask(x: np.ndarray) -> np.ndarray:
-            return np.digitize(x, unique_classes, right=False) - 1
-
-        for ax, (title, kind) in zip(axes, panels):
-            ax.set_title(title)
-            ax.axis("off")
-
-            if kind == "img":
-                ax.imshow(img_np)
-            elif kind == "gt":
-                ax.imshow(
-                    encode_mask(target_np),
-                    cmap=custom_cmap,
-                    norm=norm,
-                    interpolation="nearest",
-                )
-            elif kind == "a":
-                ax.imshow(
-                    encode_mask(pred_a),
-                    cmap=custom_cmap,
-                    norm=norm,
-                    interpolation="nearest",
-                )
-            elif kind == "b":
-                ax.imshow(
-                    encode_mask(pred_b),
-                    cmap=custom_cmap,
-                    norm=norm,
-                    interpolation="nearest",
-                )
-
-        patches = [
-            Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
-            for i in range(num_classes)
-        ]
-        fig.legend(handles=patches, loc="upper left")
-
-        buf = io.BytesIO()
-        plt.tight_layout()
-        plt.savefig(buf, facecolor="black")
-        plt.close(fig)
-        buf.seek(0)
-        return Image.open(buf)

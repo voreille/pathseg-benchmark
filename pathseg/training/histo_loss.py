@@ -17,19 +17,95 @@ def _mask_valid(logits, targets, ignore_idx):
     return logits, targets, valid
 
 
+# class CrossEntropyDiceLoss(nn.Module):
+#     def __init__(
+#         self,
+#         weight=None,
+#         ignore_index=255,
+#         ce_w=0.5,
+#         dice_w=0.5,
+#         smooth=1.0,
+#     ):
+#         super().__init__()
+#         self.ce = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index)
+#         self.ce_w = ce_w
+#         self.dice_w = dice_w
+#         self.smooth = smooth
+#         self.ignore_index = ignore_index
+
+#     def forward(self, logits, target):
+#         ce = self.ce(logits, target)
+
+#         probs = torch.softmax(logits, dim=1)
+
+#         valid_mask = target != self.ignore_index  # [B, H, W]
+
+#         safe_target = target.clone()
+#         safe_target[~valid_mask] = 0
+
+#         target_oh = torch.zeros_like(probs).scatter_(1, safe_target.unsqueeze(1), 1)
+
+#         valid_mask = valid_mask.unsqueeze(1)  # [B, 1, H, W]
+#         probs = probs * valid_mask
+#         target_oh = target_oh * valid_mask
+
+#         intersection = (probs * target_oh).sum(dim=(0, 2, 3))
+#         cardinality = (probs + target_oh).sum(dim=(0, 2, 3))
+
+#         dice = (
+#             1
+#             - ((2.0 * intersection + self.smooth) / (cardinality + self.smooth)).mean()
+#         )
+
+#         return self.ce_w * ce + self.dice_w * dice
+
+
 class CrossEntropyDiceLoss(nn.Module):
-    def __init__(
-        self,
-        weight=None,
-        ignore_index=255,
-        ce_w=0.5,
-        dice_w=0.5,
-        smooth=1.0,
-    ):
+    def __init__(self, weight=None, ignore_index=255, smooth=1e-5):
         super().__init__()
         self.ce = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index)
-        self.ce_w = ce_w
-        self.dice_w = dice_w
+        self.smooth = smooth
+        self.ignore_index = ignore_index
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        ce = self.ce(logits, target)
+
+        probs = torch.softmax(logits, dim=1)  # [B,C,H,W]
+
+        valid_mask = target != self.ignore_index
+        safe_target = target.clone()
+        safe_target[~valid_mask] = 0
+
+        target_oh = torch.zeros_like(probs).scatter_(1, safe_target.unsqueeze(1), 1)
+
+        valid_mask = valid_mask.unsqueeze(1)  # [B,1,H,W]
+        probs = probs * valid_mask
+        target_oh = target_oh * valid_mask
+
+        intersection = (probs * target_oh).sum(dim=(0, 2, 3))  # [C]
+        cardinality = (probs + target_oh).sum(dim=(0, 2, 3))  # [C]
+
+        dice_per_class = (2.0 * intersection + self.smooth) / (
+            cardinality + self.smooth
+        )
+
+        # exclude background
+        fg_dice = dice_per_class[1:]
+        fg_target_mass = target_oh[:, 1:, :, :].sum(dim=(0, 2, 3))  # [C-1]
+        present = fg_target_mass > 0
+
+        if present.any():
+            dice = 1.0 - fg_dice[present].mean()
+        else:
+            dice = logits.new_tensor(0.0)
+
+        return ce + dice
+
+
+class CrossEntropyDiceLossNnUnetLike(nn.Module):
+    def __init__(self, weight=None, ignore_index=255, smooth=1e-5):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index)
         self.smooth = smooth
         self.ignore_index = ignore_index
 
@@ -39,7 +115,6 @@ class CrossEntropyDiceLoss(nn.Module):
         probs = torch.softmax(logits, dim=1)
 
         valid_mask = target != self.ignore_index  # [B, H, W]
-
         safe_target = target.clone()
         safe_target[~valid_mask] = 0
 
@@ -49,15 +124,16 @@ class CrossEntropyDiceLoss(nn.Module):
         probs = probs * valid_mask
         target_oh = target_oh * valid_mask
 
+        # sum over batch + spatial dims (batch_dice=True), per class
         intersection = (probs * target_oh).sum(dim=(0, 2, 3))
         cardinality = (probs + target_oh).sum(dim=(0, 2, 3))
 
-        dice = (
-            1
-            - ((2.0 * intersection + self.smooth) / (cardinality + self.smooth)).mean()
+        dice_per_class = (2.0 * intersection + self.smooth) / (
+            cardinality + self.smooth
         )
+        dice = 1 - dice_per_class[1:].mean()  # exclude background (do_bg=False)
 
-        return self.ce_w * ce + self.dice_w * dice
+        return ce + dice
 
 
 class CrossEntropyDiceLossOld(nn.Module):
