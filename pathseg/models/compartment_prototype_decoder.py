@@ -668,3 +668,632 @@ class CompartmentPrototypeDecoder(Encoder):
                 raise ValueError(
                     f"image_labels must lie in [0, {int(num_classes) - 1}]"
                 )
+
+
+class TwoStagesCompartmentPrototypeDecoder(Encoder):
+    """
+    Two-stage prototype decoder.
+
+    Stage 1
+    -------
+    Head A predicts tissue compartments.
+
+    A presegmentation head takes Head A logits and predicts a single-channel
+    foreground logit. Its sigmoid gives a soft foreground probability map
+    indicating regions likely to contain pattern annotations.
+
+    Stage 2
+    -------
+    Pattern prototypes are fitted only from foreground regions, using the
+    foreground probability as a soft weight together with the support masks.
+
+    Head B outputs logits only for pattern classes (no background class).
+    Background handling is delegated to the presegmentation head at inference.
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        proto_dim: int = 256,
+        num_pattern_classes: int = 6,  # only used for the auxiliary head if use_aux_b_head=True, otherwise main head has no fixed num_classes
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        use_aux_b_head: bool = False,
+        detach_preseg_input: bool = True,
+        detach_proto_features: bool = True,
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+        )
+
+        self.num_compartments = int(num_compartments)
+        self.num_pattern_classes = int(num_pattern_classes)
+        self.center = bool(center)
+        self.eps = float(eps)
+
+        self.detach_preseg_input = bool(detach_preseg_input)
+        self.detach_proto_features = bool(detach_proto_features)
+
+        self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, kernel_size=1)
+
+        # Single-channel FG logit from compartment logits
+        self.presegmentation_head = nn.Conv2d(
+            self.num_compartments,
+            1,
+            kernel_size=1,
+        )
+
+        self.proto_proj = ProtoProjLite(
+            self.embed_dim,
+            proto_dim,
+            hidden_dim=proto_dim,
+        )
+
+        self.head_b_aux = (
+            nn.Conv2d(self.embed_dim, self.num_pattern_classes + 1, kernel_size=1)
+            if use_aux_b_head
+            else None
+        )
+
+        log_temp = torch.log(torch.tensor(float(temperature_init)))
+        if learnable_temp:
+            self.log_temp = nn.Parameter(log_temp)
+        else:
+            self.register_buffer("log_temp", log_temp)
+
+    # --------------------------------------------------------
+    # utilities
+    # --------------------------------------------------------
+    def _tokens_to_map(self, x: torch.Tensor) -> torch.Tensor:
+        gh, gw = self.grid_size
+        return x.transpose(1, 2).reshape(x.shape[0], x.shape[2], gh, gw)
+
+    def forward_features_map(self, x: torch.Tensor) -> torch.Tensor:
+        return self._tokens_to_map(super().forward(x))
+
+    def _empty_ctx(
+        self,
+        device: torch.device,
+        proto_dim: int,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "prototypes": torch.empty(0, proto_dim, device=device),
+            "label_ids": torch.empty(0, dtype=torch.long, device=device),
+        }
+
+    # --------------------------------------------------------
+    # inference helper
+    # --------------------------------------------------------
+    @torch.no_grad()
+    def predict_segmentation(
+        self,
+        out: dict[str, torch.Tensor],
+        fg_threshold: float = 0.5,
+    ) -> torch.Tensor:
+        """
+        Convert model outputs to a full semantic prediction.
+
+        Returns:
+            pred: [B,H,W]
+                0 = background
+                1..K = pattern classes
+        """
+        fg_prob = out["fg_prob"]  # [B,1,H,W]
+        logits_b = out["logits_b"]  # [B,K,H,W]
+
+        pred_patterns = torch.argmax(logits_b, dim=1) + 1  # [B,H,W], shift by +1
+        pred = pred_patterns.clone()
+        pred[fg_prob[:, 0] < fg_threshold] = 0
+        return pred
+
+    # --------------------------------------------------------
+    # forward
+    # --------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        feat = self.forward_features_map(x)
+
+        logits_a = self.head_a(feat)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        preseg_input = logits_a.detach() if self.detach_preseg_input else logits_a
+        logits_preseg = self.presegmentation_head(preseg_input)  # [B,1,H,W]
+        fg_prob = torch.sigmoid(logits_preseg)  # [B,1,H,W]
+
+        out = {
+            "feat_map": feat,
+            "logits_a": logits_a,
+            "probs_a": probs_a,
+            "logits_preseg": logits_preseg,
+            "fg_prob": fg_prob,
+        }
+
+        if self.head_b_aux is not None:
+            out["logits_b_aux"] = self.head_b_aux(feat)
+
+        if ctx is None:
+            return out
+
+        b, _, h, w = feat.shape
+        num_fg_classes = int(ctx["num_fg_classes"].item())
+        logits_b = feat.new_zeros((b, num_fg_classes, h, w))
+
+        proto_input = feat.detach() if self.detach_proto_features else feat
+        proto_feat = self.proto_proj(proto_input)
+
+        if ctx.get("center") is not None:
+            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        pair_logits = torch.einsum("bdhw,pd->bphw", proto_feat, ctx["prototypes"])
+        pair_logits = pair_logits * torch.exp(self.log_temp)
+
+        for p, lab in enumerate(ctx["label_ids"].tolist()):
+            logits_b[:, int(lab) - 1] = logits_b[:, int(lab) - 1] + pair_logits[:, p]
+
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = torch.unique(ctx["label_ids"], sorted=True)
+        out["pair_label_ids_b"] = ctx["label_ids"]
+        return out
+
+    # --------------------------------------------------------
+    # prototype fitting
+    # --------------------------------------------------------
+    @torch.no_grad()
+    def fit_prototypes(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,  # [S,K+1,H,W], K = pattern classes only and +1 for bg
+    ) -> dict[str, torch.Tensor]:
+        device = support_images.device
+        support_images = support_images.to(device)
+        pattern_targets = pattern_targets.to(device).float()
+
+        feat = self.forward_features_map(support_images)
+        logits_a = self.head_a(feat)
+
+        preseg_input = logits_a.detach() if self.detach_preseg_input else logits_a
+        logits_preseg = self.presegmentation_head(preseg_input)
+        fg_prob = torch.sigmoid(logits_preseg)  # [S,1,H,W]
+
+        proto_feat = self.proto_proj(feat)
+
+        s, d, h, w = proto_feat.shape
+        num_fg_classes = pattern_targets.shape[1] - 1
+
+        if pattern_targets.shape[-2:] != (h, w):
+            pattern_targets = F.interpolate(
+                pattern_targets,
+                size=(h, w),
+                mode="nearest",
+            )
+
+        if self.center:
+            center = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(dim=0)
+            proto_feat = proto_feat - center.view(1, -1, 1, 1)
+        else:
+            center = None
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        feat_flat = proto_feat.permute(0, 2, 3, 1).reshape(s, h * w, d)  # [S,N,D]
+        patt_flat = pattern_targets.reshape(s, num_fg_classes + 1, h * w)  # [S,K+1,N]
+        fg_flat = fg_prob.reshape(s, h * w)  # [S,N]
+
+        prototypes_list: list[torch.Tensor] = []
+        label_ids_list: list[int] = []
+
+        for k in range(1, num_fg_classes + 1):
+            weights = patt_flat[:, k] * fg_flat
+            weight_sum = weights.sum()
+
+            if weight_sum <= self.eps:
+                continue
+
+            proto_sum = torch.einsum("sn,snd->d", weights, feat_flat)
+            prototype = proto_sum / weight_sum.clamp_min(self.eps)
+            prototype = F.normalize(prototype, dim=0)
+
+            prototypes_list.append(prototype)
+            label_ids_list.append(int(k))
+
+        if len(prototypes_list) == 0:
+            ctx = self._empty_ctx(device=device, proto_dim=d)
+            if center is not None:
+                ctx["center"] = center
+            return ctx
+
+        ctx = {
+            "prototypes": torch.stack(prototypes_list, dim=0),  # [P,D]
+            "label_ids": torch.tensor(label_ids_list, dtype=torch.long, device=device),
+            "num_fg_classes": torch.tensor(
+                num_fg_classes, dtype=torch.long, device=device
+            ),
+        }
+        if center is not None:
+            ctx["center"] = center
+        return ctx
+
+    @torch.no_grad()
+    def fit_prototypes_from_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> dict[str, torch.Tensor]:
+        device = images.device
+        images = images.to(device=device)
+        image_labels = image_labels.to(device=device)
+
+        self._validate_image_labels(
+            images=images,
+            image_labels=image_labels,
+            num_classes=num_classes,
+        )
+
+        pattern_targets = self._make_full_image_pattern_targets(
+            images=images,
+            image_labels=image_labels,
+            num_classes=num_classes,
+        )
+
+        return self.fit_prototypes(
+            support_images=images,
+            pattern_targets=pattern_targets,
+        )
+
+    # --------------------------------------------------------
+    # label utilities
+    # --------------------------------------------------------
+    def _make_full_image_pattern_targets(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> torch.Tensor:
+        s, _, h, w = images.shape
+        device = images.device
+        image_labels = image_labels.to(device=device, dtype=torch.long)
+
+        pattern_targets = torch.zeros(
+            s,
+            int(num_classes),
+            h,
+            w,
+            dtype=torch.float32,
+            device=device,
+        )
+        pattern_targets[
+            torch.arange(s, device=device),
+            image_labels,
+        ] = 1.0
+        return pattern_targets
+
+    def _validate_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> None:
+        if images.ndim != 4:
+            raise ValueError(
+                f"images must have shape [S,C,H,W], got {tuple(images.shape)}"
+            )
+        if image_labels.ndim != 1:
+            raise ValueError(
+                f"image_labels must have shape [S], got {tuple(image_labels.shape)}"
+            )
+        if images.shape[0] != image_labels.shape[0]:
+            raise ValueError("images and image_labels must have the same batch size")
+
+        if image_labels.numel() > 0:
+            min_label = int(image_labels.min().item())
+            max_label = int(image_labels.max().item())
+            if min_label < 0 or max_label >= int(num_classes):
+                raise ValueError(
+                    f"image_labels must lie in [0, {int(num_classes) - 1}], "
+                    f"got min={min_label}, max={max_label}"
+                )
+
+
+class TwoStagesCompartmentPrototypeDecoderV2(Encoder):
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        proto_dim: int = 256,
+        num_pattern_classes: int = 6,  # only used for the auxiliary head if use_aux_b_head=True, otherwise main head has no fixed num_classes
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        use_aux_b_head: bool = False,
+        detach_preseg_input: bool = True,
+        detach_proto_features: bool = True,
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+        )
+
+        self.num_compartments = int(num_compartments)
+        self.num_pattern_classes = int(num_pattern_classes)
+        self.center = bool(center)
+        self.eps = float(eps)
+
+        self.detach_preseg_input = bool(detach_preseg_input)
+        self.detach_proto_features = bool(detach_proto_features)
+
+        self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, kernel_size=1)
+
+        # Single-channel FG logit from compartment logits
+        self.presegmentation_head = nn.Conv2d(
+            self.embed_dim,
+            1,
+            kernel_size=1,
+        )
+
+        self.proto_proj = ProtoProjLite(
+            self.embed_dim,
+            proto_dim,
+            hidden_dim=proto_dim,
+        )
+
+        self.head_b_aux = (
+            nn.Conv2d(self.embed_dim, self.num_pattern_classes + 1, kernel_size=1)
+            if use_aux_b_head
+            else None
+        )
+
+        log_temp = torch.log(torch.tensor(float(temperature_init)))
+        if learnable_temp:
+            self.log_temp = nn.Parameter(log_temp)
+        else:
+            self.register_buffer("log_temp", log_temp)
+
+        # --------------------------------------------------------
+
+    # forward
+    # --------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        feat = self.forward_features_map(x)
+
+        logits_a = self.head_a(feat)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        preseg_input = feat.detach() if self.detach_preseg_input else feat
+        logits_preseg = self.presegmentation_head(preseg_input)  # [B,1,H,W]
+        fg_prob = torch.sigmoid(logits_preseg)  # [B,1,H,W]
+
+        out = {
+            "feat_map": feat,
+            "logits_a": logits_a,
+            "probs_a": probs_a,
+            "logits_preseg": logits_preseg,
+            "fg_prob": fg_prob,
+        }
+
+        if self.head_b_aux is not None:
+            out["logits_b_aux"] = self.head_b_aux(feat)
+
+        if ctx is None:
+            return out
+
+        b, _, h, w = feat.shape
+        num_fg_classes = int(ctx["num_fg_classes"].item())
+        logits_b = feat.new_zeros((b, num_fg_classes, h, w))
+
+        proto_input = feat.detach() if self.detach_proto_features else feat
+        proto_feat = self.proto_proj(proto_input)
+
+        if ctx.get("center") is not None:
+            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        pair_logits = torch.einsum("bdhw,pd->bphw", proto_feat, ctx["prototypes"])
+        pair_logits = pair_logits * torch.exp(self.log_temp)
+
+        for p, lab in enumerate(ctx["label_ids"].tolist()):
+            logits_b[:, int(lab) - 1] = logits_b[:, int(lab) - 1] + pair_logits[:, p]
+
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = torch.unique(ctx["label_ids"], sorted=True)
+        out["pair_label_ids_b"] = ctx["label_ids"]
+        return out
+
+    # --------------------------------------------------------
+    # prototype fitting
+    # --------------------------------------------------------
+    @torch.no_grad()
+    def fit_prototypes(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,  # [S,K+1,H,W], K = pattern classes only and +1 for bg
+    ) -> dict[str, torch.Tensor]:
+        device = support_images.device
+        support_images = support_images.to(device)
+        pattern_targets = pattern_targets.to(device).float()
+
+        feat = self.forward_features_map(support_images)
+
+        preseg_input = feat.detach() if self.detach_preseg_input else feat
+        logits_preseg = self.presegmentation_head(preseg_input)
+        fg_prob = torch.sigmoid(logits_preseg)  # [S,1,H,W]
+
+        proto_feat = self.proto_proj(feat)
+
+        s, d, h, w = proto_feat.shape
+        num_fg_classes = pattern_targets.shape[1] - 1
+
+        if pattern_targets.shape[-2:] != (h, w):
+            pattern_targets = F.interpolate(
+                pattern_targets,
+                size=(h, w),
+                mode="nearest",
+            )
+
+        if self.center:
+            center = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(dim=0)
+            proto_feat = proto_feat - center.view(1, -1, 1, 1)
+        else:
+            center = None
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        feat_flat = proto_feat.permute(0, 2, 3, 1).reshape(s, h * w, d)  # [S,N,D]
+        patt_flat = pattern_targets.reshape(s, num_fg_classes + 1, h * w)  # [S,K+1,N]
+        fg_flat = fg_prob.reshape(s, h * w)  # [S,N]
+
+        prototypes_list: list[torch.Tensor] = []
+        label_ids_list: list[int] = []
+
+        for k in range(1, num_fg_classes + 1):
+            weights = patt_flat[:, k] * fg_flat
+            weight_sum = weights.sum()
+
+            if weight_sum <= self.eps:
+                continue
+
+            proto_sum = torch.einsum("sn,snd->d", weights, feat_flat)
+            prototype = proto_sum / weight_sum.clamp_min(self.eps)
+            prototype = F.normalize(prototype, dim=0)
+
+            prototypes_list.append(prototype)
+            label_ids_list.append(int(k))
+
+        if len(prototypes_list) == 0:
+            ctx = self._empty_ctx(device=device, proto_dim=d)
+            if center is not None:
+                ctx["center"] = center
+            return ctx
+
+        ctx = {
+            "prototypes": torch.stack(prototypes_list, dim=0),  # [P,D]
+            "label_ids": torch.tensor(label_ids_list, dtype=torch.long, device=device),
+            "num_fg_classes": torch.tensor(
+                num_fg_classes, dtype=torch.long, device=device
+            ),
+        }
+        if center is not None:
+            ctx["center"] = center
+        return ctx
+
+    @torch.no_grad()
+    def fit_prototypes_from_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> dict[str, torch.Tensor]:
+        device = images.device
+        images = images.to(device=device)
+        image_labels = image_labels.to(device=device)
+
+        self._validate_image_labels(
+            images=images,
+            image_labels=image_labels,
+            num_classes=num_classes,
+        )
+
+        pattern_targets = self._make_full_image_pattern_targets(
+            images=images,
+            image_labels=image_labels,
+            num_classes=num_classes,
+        )
+
+        return self.fit_prototypes(
+            support_images=images,
+            pattern_targets=pattern_targets,
+        )
+
+    # --------------------------------------------------------
+    # label utilities
+    # --------------------------------------------------------
+    def _make_full_image_pattern_targets(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> torch.Tensor:
+        s, _, h, w = images.shape
+        device = images.device
+        image_labels = image_labels.to(device=device, dtype=torch.long)
+
+        pattern_targets = torch.zeros(
+            s,
+            int(num_classes),
+            h,
+            w,
+            dtype=torch.float32,
+            device=device,
+        )
+        pattern_targets[
+            torch.arange(s, device=device),
+            image_labels,
+        ] = 1.0
+        return pattern_targets
+
+    def _validate_image_labels(
+        self,
+        images: torch.Tensor,
+        image_labels: torch.Tensor,
+        *,
+        num_classes: int,
+    ) -> None:
+        if images.ndim != 4:
+            raise ValueError(
+                f"images must have shape [S,C,H,W], got {tuple(images.shape)}"
+            )
+        if image_labels.ndim != 1:
+            raise ValueError(
+                f"image_labels must have shape [S], got {tuple(image_labels.shape)}"
+            )
+        if images.shape[0] != image_labels.shape[0]:
+            raise ValueError("images and image_labels must have the same batch size")
+
+        if image_labels.numel() > 0:
+            min_label = int(image_labels.min().item())
+            max_label = int(image_labels.max().item())
+            if min_label < 0 or max_label >= int(num_classes):
+                raise ValueError(
+                    f"image_labels must lie in [0, {int(num_classes) - 1}], "
+                    f"got min={min_label}, max={max_label}"
+                )

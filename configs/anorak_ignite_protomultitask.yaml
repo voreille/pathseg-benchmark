@@ -24,7 +24,7 @@ trainer:
       log_model: false
 
 model:
-  class_path: pathseg.training.prototype_multitask_semantic.TwoHeadSemanticWithSupport
+  class_path: pathseg.training.prototype_multitask_semantic.TwoHeadSemanticWithSupportWithPreseg
   init_args:
     freeze_encoder: false
     source_id_a: 0
@@ -38,18 +38,18 @@ model:
     num_classes_b: 7
     use_fixed_loss_weight_b: 1.0
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.CompartmentPrototypeDecoder
+      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoder
       init_args:
         encoder_id: "h0-mini"
         use_aux_b_head: true
         img_size: [896, 896]
         num_compartments: 16
-        num_classes_b: 7
+        num_pattern_classes: 6
         proto_dim: 256
         center: true
         temperature_init: 5.0
-        allowed_compartments: [1, 2, 3, 4, 5, 7, 12]
-        compartment_threshold: 0.2
+        # allowed_compartments: [1, 2, 3, 4, 5, 7, 12]
+        # compartment_threshold: 0.2
 
     tiler:
       class_path: pathseg.training.tiler.GridPadTiler

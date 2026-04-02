@@ -102,6 +102,74 @@ class CrossEntropyDiceLoss(nn.Module):
         return ce + dice
 
 
+class BCEDiceLoss(nn.Module):
+    def __init__(
+        self,
+        pos_weight: torch.Tensor | None = None,
+        smooth: float = 1e-5,
+        ignore_index: int | None = 255,
+        smooth_labels: bool = False,
+    ):
+        super().__init__()
+        if pos_weight is not None:
+            self.register_buffer("pos_weight", pos_weight)
+        else:
+            self.pos_weight = None
+
+        self.smooth = float(smooth)
+        self.ignore_index = ignore_index
+        self.smooth_labels = bool(smooth_labels)
+
+    def forward(
+        self,
+        logits: torch.Tensor,  # [B,1,H,W]
+        target: torch.Tensor,  # [B,1,H,W]
+    ) -> torch.Tensor:
+        if logits.shape != target.shape:
+            raise ValueError(
+                f"logits and target must have same shape, got "
+                f"{tuple(logits.shape)} vs {tuple(target.shape)}"
+            )
+
+        if self.ignore_index is not None:
+            valid_mask = target != self.ignore_index
+        else:
+            valid_mask = torch.ones_like(target, dtype=torch.bool)
+
+        valid_mask_f = valid_mask.float()
+
+        # Hard binary target for Dice and for BCE base target.
+        # Ignored pixels are safely set to 0 here, then removed by valid_mask.
+        target_hard = (target > 0.5).float()
+        target_hard = target_hard * valid_mask_f
+
+        # BCE target: optionally smoothed, but only on valid pixels.
+        target_bce = target_hard.clone()
+        if self.smooth_labels:
+            target_bce[valid_mask] = target_bce[valid_mask] * 0.9 + 0.05
+
+        bce = F.binary_cross_entropy_with_logits(
+            logits,
+            target_bce,
+            pos_weight=self.pos_weight,
+            reduction="none",
+        )
+        bce = (bce * valid_mask_f).sum() / valid_mask_f.sum().clamp_min(1.0)
+
+        probs = torch.sigmoid(logits)
+        probs = probs * valid_mask_f
+
+        intersection = (probs * target_hard).sum(dim=(0, 2, 3))
+        cardinality = (probs + target_hard).sum(dim=(0, 2, 3))
+
+        dice = (
+            1.0
+            - ((2.0 * intersection + self.smooth) / (cardinality + self.smooth)).mean()
+        )
+
+        return bce + dice
+
+
 class CrossEntropyDiceLossNnUnetLike(nn.Module):
     def __init__(self, weight=None, ignore_index=255, smooth=1e-5):
         super().__init__()

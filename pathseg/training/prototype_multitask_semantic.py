@@ -16,7 +16,7 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardInde
 
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
-from pathseg.training.histo_loss import CrossEntropyDiceLoss
+from pathseg.training.histo_loss import CrossEntropyDiceLoss, BCEDiceLoss
 
 
 class TwoHeadSemanticWithSupport(LightningModule):
@@ -832,6 +832,539 @@ class TwoHeadSemanticWithSupport(LightningModule):
             elif kind == "b":
                 ax.imshow(
                     encode_mask(pred_b),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+
+        patches = [
+            Line2D([0], [0], color=colors[i], lw=4, label=str(unique_classes[i]))
+            for i in range(num_classes)
+        ]
+        fig.legend(handles=patches, loc="upper left")
+
+        buf = io.BytesIO()
+        plt.tight_layout()
+        plt.savefig(buf, facecolor="black")
+        plt.close(fig)
+        buf.seek(0)
+        return Image.open(buf)
+
+
+class TwoHeadSemanticWithSupportWithPreseg(TwoHeadSemanticWithSupport):
+    def __init__(
+        self,
+        *args,
+        loss_weight_preseg: float = 1.0,
+        fg_threshold: float = 0.5,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.loss_weight_preseg = float(loss_weight_preseg)
+        self.fg_threshold = float(fg_threshold)
+
+        self.criterion_preseg = BCEDiceLoss(
+            ignore_index=self.ignore_idx,
+            smooth_labels=True,
+        )
+        self.criterion_b_proto = CrossEntropyDiceLoss(
+            ignore_index=self.ignore_idx,
+        )
+
+    # ------------------------------------------------------------------
+    # Targets / losses
+    # ------------------------------------------------------------------
+    def _make_pattern_only_targets(self, targets_pp: torch.Tensor) -> torch.Tensor:
+        """
+        Convert full semantic targets to pattern-only targets for head B.
+
+        Input labels:
+            0 = background
+            1..K = pattern classes
+            ignore_idx = ignore
+
+        Output labels for head B:
+            0..K-1 = pattern classes
+            ignore_idx = background or ignore
+        """
+        targets_b = torch.full_like(targets_pp, fill_value=self.ignore_idx)
+
+        valid_pattern = (targets_pp > 0) & (targets_pp != self.ignore_idx)
+        targets_b[valid_pattern] = targets_pp[valid_pattern] - 1
+
+        return targets_b
+
+    def _loss_on_preseg(
+        self,
+        logits: torch.Tensor,
+        targets_list,
+        subset_mask: torch.Tensor,
+        criterion: nn.Module,
+    ) -> torch.Tensor:
+        if subset_mask.sum().item() == 0:
+            return torch.zeros((), device=logits.device)
+
+        logits_s = logits[subset_mask]
+        targets_s = self._select(targets_list, subset_mask)
+        targets_pp = self._targets_to_tensor(targets_s, logits.device)  # [B,H,W]
+
+        targets_bin = (targets_pp > 0).float()
+        targets_bin[targets_pp == self.ignore_idx] = float(self.ignore_idx)
+        targets_bin = targets_bin.unsqueeze(1)  # [B,1,H,W]
+
+        return criterion(logits_s, targets_bin)
+
+    def _loss_on_subset_proto_preseg(
+        self,
+        logits_b: torch.Tensor,  # [B, K, H, W], K = pattern classes only
+        targets_list,
+        subset_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if subset_mask.sum().item() == 0:
+            return torch.zeros((), device=logits_b.device)
+
+        logits_s = logits_b[subset_mask]
+        targets_s = self._select(targets_list, subset_mask)
+        targets_pp = self._targets_to_tensor(targets_s, logits_b.device)  # [B,H,W]
+
+        targets_b = self._make_pattern_only_targets(targets_pp)
+
+        return self.criterion_b_proto(logits_s, targets_b)
+
+    # ------------------------------------------------------------------
+    # Inference helpers
+    # ------------------------------------------------------------------
+    def _predict_b_from_logits(
+        self,
+        logits_b: torch.Tensor,  # [B,K,H,W]
+        logits_preseg: torch.Tensor,  # [B,1,H,W]
+        fg_threshold: float | None = None,
+    ) -> torch.Tensor:
+        """
+        Build final semantic prediction for task B:
+            0 = background
+            1..K = pattern classes
+        """
+        if fg_threshold is None:
+            fg_threshold = self.fg_threshold
+
+        fg_prob = torch.sigmoid(logits_preseg)  # [B,1,H,W]
+
+        pred_patterns = torch.argmax(logits_b, dim=1) + 1  # [B,H,W]
+        pred = pred_patterns.clone()
+        pred[fg_prob[:, 0] < fg_threshold] = 0
+        return pred
+
+    def _predict_b_single(
+        self,
+        logits_b: torch.Tensor,  # [K,H,W]
+        logits_preseg: torch.Tensor,  # [1,H,W]
+        fg_threshold: float | None = None,
+    ) -> torch.Tensor:
+        if fg_threshold is None:
+            fg_threshold = self.fg_threshold
+
+        fg_prob = torch.sigmoid(logits_preseg)  # [1,H,W]
+        pred_patterns = torch.argmax(logits_b, dim=0) + 1
+        pred = pred_patterns.clone()
+        pred[fg_prob[0] < fg_threshold] = 0
+        return pred
+
+    @torch.compiler.disable
+    def update_metrics_with_predictions(
+        self,
+        preds: list[torch.Tensor],  # list of [H,W] predicted labels
+        targets: list[torch.Tensor],  # list of [H,W] GT labels
+        dataloader_idx: int,
+    ) -> None:
+        for p, t in zip(preds, targets):
+            p_in = p.unsqueeze(0)
+            t_in = t.unsqueeze(0)
+            self.iou_metrics[dataloader_idx].update(p_in, t_in)
+            self.f1_metrics[dataloader_idx].update(p_in, t_in)
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        imgs, targets, source_ids, _image_ids = batch
+        source_ids = source_ids.to(imgs.device)
+
+        if self.use_fixed_loss_weight_b is None:
+            w_b = self._get_loss_weight_b() * self.loss_weight_b
+        else:
+            w_b = float(self.use_fixed_loss_weight_b)
+
+        m_a = source_ids == self.source_id_a
+        m_b = source_ids == self.source_id_b
+
+        if w_b == 0.0:
+            out = self(imgs, ctx=None)
+
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = torch.zeros((), device=imgs.device)
+            loss_total = self.loss_weight_a * loss_a
+            label_ids_b = torch.empty(0, dtype=torch.long, device=imgs.device)
+        else:
+            ctx = self._get_ctx("train")
+            out = self(imgs, ctx=ctx)
+
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            logits_b = F.interpolate(
+                out["logits_b"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            label_ids_b = out["label_ids_b"]
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = self._loss_on_subset_proto_preseg(logits_b, targets, m_b)
+            loss_total = self.loss_weight_a * loss_a + w_b * loss_b
+
+        if out.get("logits_b_aux") is not None and m_b.any():
+            logits_b_aux = F.interpolate(
+                out["logits_b_aux"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            loss_b_aux = self._loss_on_subset_fixed(
+                logits_b_aux, targets, m_b, self.criterion_b_aux
+            )
+            self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
+            loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux
+
+        logits_preseg = F.interpolate(
+            out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        loss_preseg = self._loss_on_preseg(
+            logits_preseg,
+            targets,
+            m_b,
+            self.criterion_preseg,
+        )
+        self.log("train_loss_preseg", loss_preseg, sync_dist=True)
+
+        loss_total = loss_total + self.loss_weight_preseg * loss_preseg
+
+        self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
+        self.log("train_loss_a", loss_a, sync_dist=True)
+        self.log("train_loss_b", loss_b, sync_dist=True)
+        self.log("train_frac_a", m_a.float().mean(), sync_dist=True)
+        self.log("train_frac_b", m_b.float().mean(), sync_dist=True)
+        self.log(
+            "train_num_support_labels",
+            torch.tensor(
+                label_ids_b.numel(),
+                device=imgs.device,
+                dtype=torch.float32,
+            ),
+            sync_dist=True,
+        )
+        self.log("loss_weight_b", w_b, prog_bar=False, sync_dist=True)
+
+        return loss_total
+
+    # ------------------------------------------------------------------
+    # Eval
+    # ------------------------------------------------------------------
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        dataloader_idx=None,
+        log_prefix=None,
+    ):
+        imgs, targets, source_ids, image_ids = batch
+        sid0 = int(source_ids[0])
+
+        ctx = self._get_ctx("val" if log_prefix == "val" else "test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        crop_logits_a = F.interpolate(
+            crop_out["logits_a"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_b = F.interpolate(
+            crop_out["logits_b"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_preseg = F.interpolate(
+            crop_out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a, origins, img_sizes
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b, origins, img_sizes
+        )
+        logits_preseg_list = self.revert_window_logits_semantic(
+            crop_logits_preseg, origins, img_sizes
+        )
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        if sid0 == self.source_id_a:
+            self.update_metrics(logits_a_list, targets_pp, dataloader_idx)
+        else:
+            preds_b_list = [
+                self._predict_b_single(lb, lp)
+                for lb, lp in zip(logits_b_list, logits_preseg_list)
+            ]
+            self.update_metrics_with_predictions(
+                preds_b_list, targets_pp, dataloader_idx
+            )
+
+        if batch_idx == 0:
+            img0 = imgs[0]
+            tgt0 = targets_pp[0]
+
+            pred_b0 = self._predict_b_single(
+                logits_b_list[0],
+                logits_preseg_list[0],
+            )
+            plot = self.plot_two_head_semantic(
+                img=img0,
+                logits_a=logits_a_list[0],
+                logits_b=None,
+                pred_b=pred_b0,
+                target=tgt0,
+                gt_head="a" if sid0 == self.source_id_a else "b",
+            )
+
+            self.log_wandb_image(
+                f"{log_prefix}_{dataloader_idx}_two_head_{batch_idx}",
+                plot,
+                commit=False,
+            )
+
+    # ------------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------------
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        if len(batch) == 4:
+            imgs, targets, source_ids, img_ids = batch
+        elif len(batch) == 3:
+            imgs, targets, img_ids = batch
+            source_ids = None
+        elif len(batch) == 2:
+            imgs, img_ids = batch
+            targets = None
+            source_ids = None
+        else:
+            raise ValueError(f"Unexpected predict batch format: len={len(batch)}")
+
+        img_ids = list(img_ids)
+
+        if source_ids is not None:
+            if torch.is_tensor(source_ids):
+                source_ids = source_ids.to(self.device)
+            else:
+                source_ids = torch.as_tensor(
+                    source_ids, dtype=torch.long, device=self.device
+                )
+
+        ctx = self._get_ctx("test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        crop_logits_a = F.interpolate(
+            crop_out["logits_a"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_b = F.interpolate(
+            crop_out["logits_b"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_preseg = F.interpolate(
+            crop_out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a,
+            origins,
+            img_sizes,
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b,
+            origins,
+            img_sizes,
+        )
+        logits_preseg_list = self.revert_window_logits_semantic(
+            crop_logits_preseg,
+            origins,
+            img_sizes,
+        )
+
+        outs = []
+        for i, (logits_a, logits_b, logits_preseg) in enumerate(
+            zip(logits_a_list, logits_b_list, logits_preseg_list)
+        ):
+            pred_a = torch.argmax(logits_a, dim=0)
+            pred_b = self._predict_b_single(logits_b, logits_preseg)
+            fg_prob = torch.sigmoid(logits_preseg)[0]
+
+            out_i = {
+                "img_id": img_ids[i],
+                "logits_b": logits_b.detach().cpu(),
+                "logits_preseg": logits_preseg.detach().cpu(),
+                "fg_prob": fg_prob.detach().cpu(),
+                "pred": pred_b.detach().cpu(),
+                "logits_a": logits_a.detach().cpu(),
+                "pred_a": pred_a.detach().cpu(),
+                "img_hw": tuple(int(x) for x in pred_b.shape[-2:]),
+                "dataloader_idx": int(dataloader_idx),
+                "img": imgs[i].detach().cpu(),
+            }
+
+            if targets is not None:
+                t = targets[i]
+                out_i["target"] = t.detach().cpu() if torch.is_tensor(t) else t
+
+            if source_ids is not None:
+                out_i["source_id"] = int(source_ids[i].item())
+
+            outs.append(out_i)
+
+        return outs
+
+    # ------------------------------------------------------------------
+    # Plot
+    # ------------------------------------------------------------------
+    @torch.compiler.disable
+    def plot_two_head_semantic(
+        self,
+        img: torch.Tensor,
+        logits_a: torch.Tensor | None = None,
+        logits_b: torch.Tensor | None = None,
+        pred_b: torch.Tensor | None = None,
+        target: torch.Tensor | None = None,
+        gt_head: str | None = None,
+        cmap: str = "tab20",
+    ):
+        panels = [("Image", "img")]
+        if target is not None:
+            panels.append((f"GT ({gt_head})" if gt_head is not None else "GT", "gt"))
+        if logits_a is not None:
+            panels.append(("Head A", "a"))
+        if pred_b is not None:
+            panels.append(("Head B", "b"))
+        elif logits_b is not None:
+            panels.append(("Head B", "b_logits"))
+
+        ncols = len(panels)
+        fig, axes = plt.subplots(
+            1, ncols, figsize=(5 * ncols, 5), sharex=True, sharey=True
+        )
+        if ncols == 1:
+            axes = [axes]
+
+        img_np = img.detach().cpu().numpy().transpose(1, 2, 0)
+        if img_np.max() > 1.0:
+            img_np = img_np / 255.0
+        img_np = np.clip(img_np, 0, 1)
+
+        target_np = None if target is None else target.detach().cpu().numpy()
+
+        pred_a = None
+        if logits_a is not None:
+            pred_a = torch.argmax(logits_a, dim=0).detach().cpu().numpy()
+
+        pred_b_np = None
+        if pred_b is not None:
+            pred_b_np = pred_b.detach().cpu().numpy()
+        elif logits_b is not None:
+            pred_b_np = torch.argmax(logits_b, dim=0).detach().cpu().numpy()
+
+        uniq_parts = []
+        if target_np is not None:
+            uniq_parts.append(np.unique(target_np))
+        if pred_a is not None:
+            uniq_parts.append(np.unique(pred_a))
+        if pred_b_np is not None:
+            uniq_parts.append(np.unique(pred_b_np))
+
+        if len(uniq_parts) == 0:
+            unique_classes = np.array([0], dtype=np.int64)
+        else:
+            unique_classes = np.unique(np.concatenate(uniq_parts))
+
+        num_classes = len(unique_classes)
+        colors = plt.get_cmap(cmap, num_classes)(np.linspace(0, 1, num_classes))
+
+        if self.ignore_idx in unique_classes:
+            ignore_mask = unique_classes == self.ignore_idx
+            colors[ignore_mask] = [0, 0, 0, 1]
+
+        custom_cmap = mcolors.ListedColormap(colors)
+        norm = mcolors.Normalize(vmin=0, vmax=num_classes - 1)
+
+        def encode_mask(x: np.ndarray) -> np.ndarray:
+            return np.digitize(x, unique_classes, right=False) - 1
+
+        for ax, (title, kind) in zip(axes, panels):
+            ax.set_title(title)
+            ax.axis("off")
+
+            if kind == "img":
+                ax.imshow(img_np)
+            elif kind == "gt":
+                ax.imshow(
+                    encode_mask(target_np),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind == "a":
+                ax.imshow(
+                    encode_mask(pred_a),
+                    cmap=custom_cmap,
+                    norm=norm,
+                    interpolation="nearest",
+                )
+            elif kind in {"b", "b_logits"}:
+                ax.imshow(
+                    encode_mask(pred_b_np),
                     cmap=custom_cmap,
                     norm=norm,
                     interpolation="nearest",
