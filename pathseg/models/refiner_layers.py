@@ -164,3 +164,111 @@ class ProtoProjLite(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.block(x) + self.skip(x)
+
+
+class ConvRefineBlockGN(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        kernel_size: int = 5,
+        mlp_ratio: float = 2.0,
+        num_groups: int = 8,
+        dropout: float = 0.0,
+        layer_scale_init_value: float = 1e-6,
+    ):
+        super().__init__()
+
+        if dim % num_groups != 0:
+            raise ValueError("dim must be divisible by num_groups")
+
+        if kernel_size % 2 == 0:
+            raise ValueError("kernel_size must be odd")
+
+        hidden_dim = int(dim * mlp_ratio)
+
+        self.dwconv = nn.Conv2d(
+            dim,
+            dim,
+            kernel_size=kernel_size,
+            padding=kernel_size // 2,
+            groups=dim,
+            bias=False,
+        )
+        self.norm = nn.GroupNorm(num_groups=num_groups, num_channels=dim)
+        self.pw1 = nn.Conv2d(dim, hidden_dim, kernel_size=1, bias=False)
+        self.act = nn.GELU()
+        self.pw2 = nn.Conv2d(hidden_dim, dim, kernel_size=1, bias=False)
+        self.drop = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
+
+        if layer_scale_init_value > 0:
+            self.gamma = nn.Parameter(layer_scale_init_value * torch.ones(dim))
+        else:
+            self.gamma = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        residual = x
+        x = self.dwconv(x)
+        x = self.norm(x)
+        x = self.pw1(x)
+        x = self.act(x)
+        x = self.pw2(x)
+        x = self.drop(x)
+
+        if self.gamma is not None:
+            x = x * self.gamma[:, None, None]
+
+        return residual + x
+
+
+class ProtoProjGN(nn.Module):
+    def __init__(
+        self,
+        in_dim: int,
+        proto_dim: int,
+        hidden_dim: int | None = None,
+        depth: int = 2,
+        kernel_size: int = 5,
+        mlp_ratio: float = 2.0,
+        num_groups: int = 8,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+
+        if hidden_dim is None:
+            hidden_dim = max(proto_dim, in_dim // 4)
+
+        if hidden_dim % num_groups != 0:
+            raise ValueError("hidden_dim must be divisible by num_groups")
+
+        self.in_proj = nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=num_groups, num_channels=hidden_dim),
+            nn.GELU(),
+        )
+
+        self.blocks = nn.Sequential(
+            *[
+                ConvRefineBlockGN(
+                    dim=hidden_dim,
+                    kernel_size=kernel_size,
+                    mlp_ratio=mlp_ratio,
+                    num_groups=num_groups,
+                    dropout=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
+
+        self.out_proj = nn.Sequential(
+            nn.GroupNorm(num_groups=num_groups, num_channels=hidden_dim),
+            nn.Conv2d(hidden_dim, proto_dim, kernel_size=1, bias=True),
+        )
+
+        self.skip_proj = nn.Conv2d(in_dim, proto_dim, kernel_size=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        skip = self.skip_proj(x)
+        x = self.in_proj(x)
+        x = self.blocks(x)
+        x = self.out_proj(x)
+        return x + skip

@@ -179,6 +179,7 @@ class LungHist700PrototypeDataModule(LightningDataModule):
         support_fixed_for_predict: bool = True,
         exclude_support_from_query: bool = True,
         ignore_idx: int = 255,
+        superclass: str | None = None,
     ) -> None:
         super().__init__(
             root=str(root),
@@ -205,6 +206,7 @@ class LungHist700PrototypeDataModule(LightningDataModule):
         self.support_fixed_seed = int(support_fixed_seed)
         self.support_fixed_for_predict = bool(support_fixed_for_predict)
         self.exclude_support_from_query = bool(exclude_support_from_query)
+        self.superclass = str(superclass) if superclass is not None else None
 
         self.dataloader_kwargs = {
             "batch_size": batch_size,
@@ -247,6 +249,13 @@ class LungHist700PrototypeDataModule(LightningDataModule):
 
     def setup(self, stage: str | None = None):
         df = self._read_metadata()
+
+        if self.superclass is not None:
+            if "superclass" not in df.columns:
+                raise ValueError(
+                    f"superclass column not found in metadata, required for superclass={self.superclass}"
+                )
+            df = df[df["superclass"] == self.superclass].reset_index(drop=True)
 
         support_df = df[df["split"] == self.support_split].reset_index(drop=True)
         query_df = df[df["split"] == self.predict_split].reset_index(drop=True)

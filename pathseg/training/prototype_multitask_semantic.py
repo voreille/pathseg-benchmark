@@ -264,15 +264,6 @@ class TwoHeadSemanticWithSupport(LightningModule):
                 targets, dtype=torch.long, device=self.device
             )
 
-            # conditioned decoder: requires explicit num_classes
-            if hasattr(self.network, "selected_compartments"):
-                return self.network.fit_prototypes_from_image_labels(
-                    images=images,
-                    image_labels=image_labels,
-                    num_classes=self.num_classes_b,
-                )
-
-            # unconditioned decoder
             return self.network.fit_prototypes_from_image_labels(
                 images=images,
                 image_labels=image_labels,
@@ -1249,7 +1240,7 @@ class TwoHeadSemanticWithSupportWithPreseg(TwoHeadSemanticWithSupport):
                 "logits_b": logits_b.detach().cpu(),
                 "logits_preseg": logits_preseg.detach().cpu(),
                 "fg_prob": fg_prob.detach().cpu(),
-                "pred": pred_b.detach().cpu(),
+                "pred_b": pred_b.detach().cpu(),
                 "logits_a": logits_a.detach().cpu(),
                 "pred_a": pred_a.detach().cpu(),
                 "img_hw": tuple(int(x) for x in pred_b.shape[-2:]),

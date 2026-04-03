@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from pathseg.models.encoder import Encoder
-from pathseg.models.refiner_layers import ProtoProjLite, LayerNorm2d
+from pathseg.models.refiner_layers import ProtoProjLite, LayerNorm2d, ProtoProjGN
 
 
 class TumorOnlyPrototypeDecoderRefined(Encoder):
@@ -937,8 +937,6 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         self,
         images: torch.Tensor,
         image_labels: torch.Tensor,
-        *,
-        num_classes: int,
     ) -> dict[str, torch.Tensor]:
         device = images.device
         images = images.to(device=device)
@@ -947,19 +945,19 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         self._validate_image_labels(
             images=images,
             image_labels=image_labels,
-            num_classes=num_classes,
         )
 
-        pattern_targets = self._make_full_image_pattern_targets(
+        pattern_targets, label_mapping = self._make_full_image_pattern_targets(
             images=images,
             image_labels=image_labels,
-            num_classes=num_classes,
         )
 
-        return self.fit_prototypes(
+        ctx = self.fit_prototypes(
             support_images=images,
             pattern_targets=pattern_targets,
         )
+        ctx["label_mapping"] = label_mapping
+        return ctx
 
     # --------------------------------------------------------
     # label utilities
@@ -968,16 +966,22 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         self,
         images: torch.Tensor,
         image_labels: torch.Tensor,
-        *,
-        num_classes: int,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, dict[int, int]]:
         s, _, h, w = images.shape
         device = images.device
         image_labels = image_labels.to(device=device, dtype=torch.long)
+        label_mapping = {
+            idx + 1: lab.item() for idx, lab in enumerate(image_labels.unique())
+        }
+        image_labels_one_hot_idx = torch.zeros_like(image_labels, dtype=torch.long)
+        for idx, lab in label_mapping.items():
+            image_labels_one_hot_idx[image_labels == lab] = idx
+
+        num_fg_classes = len(label_mapping)
 
         pattern_targets = torch.zeros(
             s,
-            int(num_classes),
+            int(num_fg_classes) + 1,
             h,
             w,
             dtype=torch.float32,
@@ -985,16 +989,14 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         )
         pattern_targets[
             torch.arange(s, device=device),
-            image_labels,
+            image_labels_one_hot_idx,
         ] = 1.0
-        return pattern_targets
+        return pattern_targets, label_mapping
 
     def _validate_image_labels(
         self,
         images: torch.Tensor,
         image_labels: torch.Tensor,
-        *,
-        num_classes: int,
     ) -> None:
         if images.ndim != 4:
             raise ValueError(
@@ -1006,15 +1008,6 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
             )
         if images.shape[0] != image_labels.shape[0]:
             raise ValueError("images and image_labels must have the same batch size")
-
-        if image_labels.numel() > 0:
-            min_label = int(image_labels.min().item())
-            max_label = int(image_labels.max().item())
-            if min_label < 0 or max_label >= int(num_classes):
-                raise ValueError(
-                    f"image_labels must lie in [0, {int(num_classes) - 1}], "
-                    f"got min={min_label}, max={max_label}"
-                )
 
 
 class TwoStagesCompartmentPrototypeDecoderV2(TwoStagesCompartmentPrototypeDecoder):
@@ -1214,90 +1207,6 @@ class TwoStagesCompartmentPrototypeDecoderV2(TwoStagesCompartmentPrototypeDecode
             ctx["center"] = center
         return ctx
 
-    @torch.no_grad()
-    def fit_prototypes_from_image_labels(
-        self,
-        images: torch.Tensor,
-        image_labels: torch.Tensor,
-        *,
-        num_classes: int,
-    ) -> dict[str, torch.Tensor]:
-        device = images.device
-        images = images.to(device=device)
-        image_labels = image_labels.to(device=device)
-
-        self._validate_image_labels(
-            images=images,
-            image_labels=image_labels,
-            num_classes=num_classes,
-        )
-
-        pattern_targets = self._make_full_image_pattern_targets(
-            images=images,
-            image_labels=image_labels,
-            num_classes=num_classes,
-        )
-
-        return self.fit_prototypes(
-            support_images=images,
-            pattern_targets=pattern_targets,
-        )
-
-    # --------------------------------------------------------
-    # label utilities
-    # --------------------------------------------------------
-    def _make_full_image_pattern_targets(
-        self,
-        images: torch.Tensor,
-        image_labels: torch.Tensor,
-        *,
-        num_classes: int,
-    ) -> torch.Tensor:
-        s, _, h, w = images.shape
-        device = images.device
-        image_labels = image_labels.to(device=device, dtype=torch.long)
-
-        pattern_targets = torch.zeros(
-            s,
-            int(num_classes),
-            h,
-            w,
-            dtype=torch.float32,
-            device=device,
-        )
-        pattern_targets[
-            torch.arange(s, device=device),
-            image_labels,
-        ] = 1.0
-        return pattern_targets
-
-    def _validate_image_labels(
-        self,
-        images: torch.Tensor,
-        image_labels: torch.Tensor,
-        *,
-        num_classes: int,
-    ) -> None:
-        if images.ndim != 4:
-            raise ValueError(
-                f"images must have shape [S,C,H,W], got {tuple(images.shape)}"
-            )
-        if image_labels.ndim != 1:
-            raise ValueError(
-                f"image_labels must have shape [S], got {tuple(image_labels.shape)}"
-            )
-        if images.shape[0] != image_labels.shape[0]:
-            raise ValueError("images and image_labels must have the same batch size")
-
-        if image_labels.numel() > 0:
-            min_label = int(image_labels.min().item())
-            max_label = int(image_labels.max().item())
-            if min_label < 0 or max_label >= int(num_classes):
-                raise ValueError(
-                    f"image_labels must lie in [0, {int(num_classes) - 1}], "
-                    f"got min={min_label}, max={max_label}"
-                )
-
 
 class LabelPrototypeDecoder(Encoder):
     """
@@ -1441,7 +1350,7 @@ class LabelPrototypeDecoder(Encoder):
 
         # expand to global class space
         logits_b = logits_local.new_full((b, self.num_classes_b, h, w), -1e4)
-        logits_b[:, 0, :, :] = 0.0 
+        logits_b[:, 0, :, :] = 0.0
 
         logits_b[:, ctx["label_ids"], :, :] = logits_local
 
@@ -1602,3 +1511,100 @@ class LabelPrototypeDecoder(Encoder):
                 raise ValueError(
                     f"image_labels must lie in [0, {int(num_classes) - 1}]"
                 )
+
+
+class TwoStagesCompartmentPrototypeDecoderRefined(Encoder):
+    """
+    Two-stage prototype decoder.
+
+    Stage 1
+    -------
+    Head A predicts tissue compartments.
+
+    A presegmentation head takes Head A logits and predicts a single-channel
+    foreground logit. Its sigmoid gives a soft foreground probability map
+    indicating regions likely to contain pattern annotations.
+
+    Stage 2
+    -------
+    Pattern prototypes are fitted only from foreground regions, using the
+    foreground probability as a soft weight together with the support masks.
+
+    Head B outputs logits only for pattern classes (no background class).
+    Background handling is delegated to the presegmentation head at inference.
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        proto_dim: int = 256,
+        num_pattern_classes: int = 6,  # only used for the auxiliary head if use_aux_b_head=True, otherwise main head has no fixed num_classes
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        use_aux_b_head: bool = False,
+        detach_preseg_input: bool = True,
+        detach_proto_features: bool = True,
+        protoproj_hidden_dim: int = 256,
+        protoproj_depth: int = 2,
+        protoproj_kernel_size: int = 5,
+        protoproj_mlp_ratio: float = 2.0,
+        protoproj_num_groups: int = 8,
+        protoproj_dropout: float = 0.0,
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+        )
+
+        self.num_compartments = int(num_compartments)
+        self.num_pattern_classes = int(num_pattern_classes)
+        self.center = bool(center)
+        self.eps = float(eps)
+
+        self.detach_preseg_input = bool(detach_preseg_input)
+        self.detach_proto_features = bool(detach_proto_features)
+
+        self.head_a = nn.Conv2d(self.embed_dim, self.num_compartments, kernel_size=1)
+
+        # Single-channel FG logit from compartment logits
+        self.presegmentation_head = nn.Conv2d(
+            self.num_compartments,
+            1,
+            kernel_size=1,
+        )
+
+        self.proto_proj = ProtoProjGN(
+            self.embed_dim,
+            proto_dim,
+            hidden_dim=protoproj_hidden_dim,
+            depth=protoproj_depth,
+            kernel_size=protoproj_kernel_size,
+            mlp_ratio=protoproj_mlp_ratio,
+            num_groups=protoproj_num_groups,
+            dropout=protoproj_dropout,
+        )
+
+        self.head_b_aux = (
+            nn.Conv2d(self.embed_dim, self.num_pattern_classes + 1, kernel_size=1)
+            if use_aux_b_head
+            else None
+        )
+
+        log_temp = torch.log(torch.tensor(float(temperature_init)))
+        if learnable_temp:
+            self.log_temp = nn.Parameter(log_temp)
+        else:
+            self.register_buffer("log_temp", log_temp)

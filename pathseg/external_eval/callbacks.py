@@ -227,9 +227,9 @@ class SavePrototypeROIPredictionsCallback(Callback):
         for o in outputs:
             img_id = str(o["img_id"])
 
-            pred_b_t = o["pred"]
+            pred_b_t = o["pred_b"]
             pred_a_t = o["pred_a"]
-            logits_b_t = o["logits"]
+            logits_b_t = o["logits_b"]
             logits_a_t = o["logits_a"]
             img_t = o.get("img", None)
 
