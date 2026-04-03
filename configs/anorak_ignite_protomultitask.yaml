@@ -38,7 +38,7 @@ model:
     num_classes_b: 7
     # use_fixed_loss_weight_b: 1.0
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoder
+      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoderV2
       init_args:
         encoder_id: "h0-mini"
         use_aux_b_head: true

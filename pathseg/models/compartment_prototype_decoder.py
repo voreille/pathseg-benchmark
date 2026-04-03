@@ -1017,7 +1017,7 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
                 )
 
 
-class TwoStagesCompartmentPrototypeDecoderV2(Encoder):
+class TwoStagesCompartmentPrototypeDecoderV2(TwoStagesCompartmentPrototypeDecoder):
     def __init__(
         self,
         *,
