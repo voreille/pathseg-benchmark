@@ -1513,7 +1513,7 @@ class LabelPrototypeDecoder(Encoder):
                 )
 
 
-class TwoStagesCompartmentPrototypeDecoderRefined(Encoder):
+class TwoStagesCompartmentPrototypeDecoderRefined(TwoStagesCompartmentPrototypeDecoder):
     """
     Two-stage prototype decoder.
 
@@ -1608,3 +1608,379 @@ class TwoStagesCompartmentPrototypeDecoderRefined(Encoder):
             self.log_temp = nn.Parameter(log_temp)
         else:
             self.register_buffer("log_temp", log_temp)
+
+
+class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
+    TwoStagesCompartmentPrototypeDecoder
+):
+    """
+    Variant of TwoStagesCompartmentPrototypeDecoder with:
+    - linear prototype projection (1x1 conv)
+    - multiple local prototypes per class from weighted k-means on support pixels
+    - per-class aggregation with logsumexp instead of summing one prototype/class
+
+    Notes
+    -----
+    - Background handling is unchanged: still delegated to presegmentation.
+    - K-means is done independently for each foreground class on support pixels.
+    - Prototypes are stored in ctx["prototypes"] with their class IDs in ctx["label_ids"].
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        num_compartments: int = 16,
+        proto_dim: int = 256,
+        num_pattern_classes: int = 6,
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        use_aux_b_head: bool = False,
+        detach_preseg_input: bool = True,
+        detach_proto_features: bool = True,
+        num_local_prototypes: int = 4,
+        kmeans_iters: int = 10,
+        kmeans_sample_limit: int = 2048,
+        kmeans_weight_thresh: float = 1e-3,
+        class_logit_pool: str = "logsumexp",
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+            center=center,
+            num_compartments=num_compartments,
+            proto_dim=proto_dim,
+            num_pattern_classes=num_pattern_classes,
+            temperature_init=temperature_init,
+            learnable_temp=learnable_temp,
+            eps=eps,
+            use_aux_b_head=use_aux_b_head,
+            detach_preseg_input=detach_preseg_input,
+            detach_proto_features=detach_proto_features,
+        )
+
+        self.num_local_prototypes = int(num_local_prototypes)
+        self.kmeans_iters = int(kmeans_iters)
+        self.kmeans_sample_limit = int(kmeans_sample_limit)
+        self.kmeans_weight_thresh = float(kmeans_weight_thresh)
+        self.class_logit_pool = str(class_logit_pool)
+
+        if self.num_local_prototypes < 1:
+            raise ValueError("num_local_prototypes must be >= 1")
+        if self.kmeans_iters < 1:
+            raise ValueError("kmeans_iters must be >= 1")
+        if self.class_logit_pool not in {"logsumexp", "max", "mean"}:
+            raise ValueError("class_logit_pool must be one of: logsumexp, max, mean")
+
+        # Replace ProtoProjLite by a linear projection.
+        self.proto_proj = nn.Conv2d(
+            self.embed_dim,
+            proto_dim,
+            kernel_size=1,
+            bias=False,
+        )
+
+    # --------------------------------------------------------
+    # helpers
+    # --------------------------------------------------------
+    def _empty_ctx(
+        self,
+        device: torch.device,
+        proto_dim: int,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "prototypes": torch.empty(0, proto_dim, device=device),
+            "label_ids": torch.empty(0, dtype=torch.long, device=device),
+            "num_fg_classes": torch.tensor(0, dtype=torch.long, device=device),
+        }
+
+    def _aggregate_class_logits(self, pair_logits: torch.Tensor) -> torch.Tensor:
+        """
+        pair_logits: [B, M, H, W] for the M prototypes of one class
+        returns: [B, H, W]
+        """
+        if pair_logits.shape[1] == 0:
+            raise ValueError("pair_logits must contain at least one prototype")
+
+        if self.class_logit_pool == "logsumexp":
+            return torch.logsumexp(pair_logits, dim=1)
+        if self.class_logit_pool == "max":
+            return pair_logits.max(dim=1).values
+        if self.class_logit_pool == "mean":
+            return pair_logits.mean(dim=1)
+        raise RuntimeError(f"Unsupported class_logit_pool={self.class_logit_pool}")
+
+    def _subsample_weighted(
+        self,
+        feats: torch.Tensor,  # [N, D]
+        weights: torch.Tensor,  # [N]
+        max_samples: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        n = feats.shape[0]
+        if n <= max_samples:
+            return feats, weights
+
+        probs = weights / weights.sum().clamp_min(self.eps)
+        idx = torch.multinomial(probs, num_samples=max_samples, replacement=False)
+        return feats[idx], weights[idx]
+
+    def _init_kmeans_centers_weighted(
+        self,
+        feats: torch.Tensor,  # [N, D], already normalized
+        weights: torch.Tensor,  # [N]
+        num_centers: int,
+    ) -> torch.Tensor:
+        """
+        Weighted farthest-point style initialization.
+        """
+        n, d = feats.shape
+        if num_centers == 1:
+            center = (weights[:, None] * feats).sum(dim=0) / weights.sum().clamp_min(
+                self.eps
+            )
+            return F.normalize(center[None], dim=1)
+
+        probs = weights / weights.sum().clamp_min(self.eps)
+        first_idx = torch.multinomial(probs, num_samples=1).item()
+        centers = [feats[first_idx]]
+
+        min_dist = 1.0 - (feats @ centers[0].unsqueeze(1)).squeeze(1)  # cosine dist
+
+        for _ in range(1, num_centers):
+            score = min_dist.clamp_min(0.0) * weights
+            if float(score.sum()) <= self.eps:
+                next_idx = torch.multinomial(probs, num_samples=1).item()
+            else:
+                next_idx = torch.argmax(score).item()
+            centers.append(feats[next_idx])
+            dist_new = 1.0 - (feats @ centers[-1].unsqueeze(1)).squeeze(1)
+            min_dist = torch.minimum(min_dist, dist_new)
+
+        centers = torch.stack(centers, dim=0)  # [K, D]
+        return F.normalize(centers, dim=1)
+
+    def _weighted_kmeans(
+        self,
+        feats: torch.Tensor,  # [N, D], normalized
+        weights: torch.Tensor,  # [N]
+        num_centers: int,
+        num_iters: int,
+    ) -> torch.Tensor:
+        """
+        Weighted spherical-ish k-means:
+        - assignment by cosine similarity
+        - centroid update by weighted average then renormalization
+        """
+        n, d = feats.shape
+        k = min(int(num_centers), n)
+
+        if k == 0:
+            return feats.new_empty((0, d))
+        if k == 1:
+            center = (weights[:, None] * feats).sum(dim=0) / weights.sum().clamp_min(
+                self.eps
+            )
+            return F.normalize(center[None], dim=1)
+
+        centers = self._init_kmeans_centers_weighted(feats, weights, k)
+
+        for _ in range(num_iters):
+            sims = feats @ centers.t()  # [N, K]
+            assign = sims.argmax(dim=1)  # [N]
+
+            new_centers = []
+            for j in range(k):
+                mask = assign == j
+                if not mask.any():
+                    # Re-seed empty cluster with high-weight far point.
+                    fallback_idx = torch.argmax(weights).item()
+                    c = feats[fallback_idx]
+                else:
+                    wj = weights[mask]
+                    fj = feats[mask]
+                    c = (wj[:, None] * fj).sum(dim=0) / wj.sum().clamp_min(self.eps)
+                new_centers.append(c)
+
+            centers = F.normalize(torch.stack(new_centers, dim=0), dim=1)
+
+        return centers
+
+    # --------------------------------------------------------
+    # forward
+    # --------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        feat = self.forward_features_map(x)
+
+        logits_a = self.head_a(feat)
+        probs_a = F.softmax(logits_a, dim=1)
+
+        preseg_input = logits_a.detach() if self.detach_preseg_input else logits_a
+        logits_preseg = self.presegmentation_head(preseg_input)
+        fg_prob = torch.sigmoid(logits_preseg)
+
+        out = {
+            "feat_map": feat,
+            "logits_a": logits_a,
+            "probs_a": probs_a,
+            "logits_preseg": logits_preseg,
+            "fg_prob": fg_prob,
+        }
+
+        if self.head_b_aux is not None:
+            out["logits_b_aux"] = self.head_b_aux(feat)
+
+        if ctx is None:
+            return out
+
+        b, _, h, w = feat.shape
+        num_fg_classes = int(ctx["num_fg_classes"].item())
+        logits_b = feat.new_zeros((b, num_fg_classes, h, w))
+
+        proto_input = feat.detach() if self.detach_proto_features else feat
+        proto_feat = self.proto_proj(proto_input)
+
+        if ctx.get("center") is not None:
+            proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        prototypes = ctx["prototypes"]  # [P, D]
+        label_ids = ctx["label_ids"]  # [P]
+
+        if prototypes.numel() == 0:
+            out["logits_b"] = logits_b
+            out["label_ids_b"] = torch.empty(0, dtype=torch.long, device=feat.device)
+            out["pair_label_ids_b"] = label_ids
+            return out
+
+        pair_logits = torch.einsum("bdhw,pd->bphw", proto_feat, prototypes)
+        pair_logits = pair_logits * torch.exp(self.log_temp)
+
+        unique_labs = torch.unique(label_ids, sorted=True)
+        for lab in unique_labs.tolist():
+            idx = torch.where(label_ids == lab)[0]
+            class_pair_logits = pair_logits[:, idx]  # [B, M, H, W]
+            logits_b[:, int(lab) - 1] = self._aggregate_class_logits(class_pair_logits)
+
+        out["logits_b"] = logits_b
+        out["label_ids_b"] = unique_labs
+        out["pair_label_ids_b"] = label_ids
+        return out
+
+    # --------------------------------------------------------
+    # prototype fitting
+    # --------------------------------------------------------
+    @torch.no_grad()
+    def fit_prototypes(
+        self,
+        support_images: torch.Tensor,
+        pattern_targets: torch.Tensor,  # [S,K+1,H,W]
+    ) -> dict[str, torch.Tensor]:
+        device = support_images.device
+        support_images = support_images.to(device)
+        pattern_targets = pattern_targets.to(device).float()
+
+        feat = self.forward_features_map(support_images)
+        logits_a = self.head_a(feat)
+
+        preseg_input = logits_a.detach() if self.detach_preseg_input else logits_a
+        logits_preseg = self.presegmentation_head(preseg_input)
+        fg_prob = torch.sigmoid(logits_preseg)  # [S,1,H,W]
+
+        proto_feat = self.proto_proj(feat)
+
+        s, d, h, w = proto_feat.shape
+        num_fg_classes = pattern_targets.shape[1] - 1
+
+        if pattern_targets.shape[-2:] != (h, w):
+            pattern_targets = F.interpolate(
+                pattern_targets,
+                size=(h, w),
+                mode="nearest",
+            )
+
+        if self.center:
+            center = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(dim=0)
+            proto_feat = proto_feat - center.view(1, -1, 1, 1)
+        else:
+            center = None
+
+        proto_feat = F.normalize(proto_feat, dim=1)
+
+        feat_flat = proto_feat.permute(0, 2, 3, 1).reshape(s * h * w, d)  # [SN, D]
+        patt_flat = pattern_targets.reshape(s, num_fg_classes + 1, h * w)
+        patt_flat = patt_flat.permute(0, 2, 1).reshape(s * h * w, num_fg_classes + 1)
+        fg_flat = fg_prob.reshape(s * h * w)  # [SN]
+
+        prototypes_list: list[torch.Tensor] = []
+        label_ids_list: list[int] = []
+
+        for k in range(1, num_fg_classes + 1):
+            class_mask = patt_flat[:, k] > 0.5
+            if not class_mask.any():
+                continue
+
+            weights_k = patt_flat[class_mask, k] * fg_flat[class_mask]
+            valid = weights_k > self.kmeans_weight_thresh
+            if not valid.any():
+                continue
+
+            feats_k = feat_flat[class_mask][valid]  # [Nk, D]
+            weights_k = weights_k[valid]  # [Nk]
+
+            if feats_k.shape[0] == 0:
+                continue
+
+            feats_k, weights_k = self._subsample_weighted(
+                feats_k,
+                weights_k,
+                max_samples=self.kmeans_sample_limit,
+            )
+
+            num_centers_k = min(self.num_local_prototypes, feats_k.shape[0])
+
+            centers_k = self._weighted_kmeans(
+                feats=feats_k,
+                weights=weights_k,
+                num_centers=num_centers_k,
+                num_iters=self.kmeans_iters,
+            )  # [Mk, D]
+
+            for c in centers_k:
+                prototypes_list.append(F.normalize(c, dim=0))
+                label_ids_list.append(int(k))
+
+        if len(prototypes_list) == 0:
+            ctx = self._empty_ctx(device=device, proto_dim=d)
+            if center is not None:
+                ctx["center"] = center
+            ctx["num_fg_classes"] = torch.tensor(
+                num_fg_classes, dtype=torch.long, device=device
+            )
+            return ctx
+
+        ctx = {
+            "prototypes": torch.stack(prototypes_list, dim=0),  # [P, D]
+            "label_ids": torch.tensor(label_ids_list, dtype=torch.long, device=device),
+            "num_fg_classes": torch.tensor(
+                num_fg_classes, dtype=torch.long, device=device
+            ),
+        }
+        if center is not None:
+            ctx["center"] = center
+        return ctx

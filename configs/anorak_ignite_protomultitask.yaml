@@ -38,7 +38,7 @@ model:
     num_classes_b: 7
     # use_fixed_loss_weight_b: 1.0
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoder
+      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoderLocalKMeans
       init_args:
         encoder_id: "h0-mini"
         use_aux_b_head: true
@@ -48,7 +48,7 @@ model:
         proto_dim: 256
         center: true
         temperature_init: 5.0
-        detach_proto_features: false
+        num_local_prototypes: 4
 
     tiler:
       class_path: pathseg.training.tiler.GridPadTiler
