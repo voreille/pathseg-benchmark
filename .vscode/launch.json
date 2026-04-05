@@ -104,19 +104,19 @@
             "args": [
                 "predict",
                 "-c",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/m2svaaiw/config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/4su3gsjh/config.yaml",
                 "-c",
-                "configs/eval/anorak_ignite.yaml",
-                // "configs/eval/lunghist700.yaml",
+                // "configs/eval/anorak_ignite.yaml",
+                "configs/eval/lunghist700.yaml",
                 "--no_compile",
                 "--ckpt_path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/m2svaaiw/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/4su3gsjh/epoch=26-step=40000.ckpt",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "1",
+                "CUDA_VISIBLE_DEVICES": "0",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false

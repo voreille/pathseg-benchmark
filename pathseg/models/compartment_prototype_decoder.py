@@ -701,6 +701,7 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         discard_last_mlp: bool = False,
         discard_last_block: bool = False,
         center: bool = True,
+        center_per_image: bool = False,
         num_compartments: int = 16,
         proto_dim: int = 256,
         num_pattern_classes: int = 6,  # only used for the auxiliary head if use_aux_b_head=True, otherwise main head has no fixed num_classes
@@ -710,6 +711,7 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         use_aux_b_head: bool = False,
         detach_preseg_input: bool = True,
         detach_proto_features: bool = True,
+        protoproj_id: str = "linear",
     ) -> None:
         super().__init__(
             encoder_id=encoder_id,
@@ -722,7 +724,12 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
 
         self.num_compartments = int(num_compartments)
         self.num_pattern_classes = int(num_pattern_classes)
+
+        if center and center_per_image:
+            raise ValueError("center and center_per_image cannot both be True")
         self.center = bool(center)
+        self.center_per_image = bool(center_per_image)
+
         self.eps = float(eps)
 
         self.detach_preseg_input = bool(detach_preseg_input)
@@ -742,6 +749,21 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
             proto_dim,
             hidden_dim=proto_dim,
         )
+        if protoproj_id == "linear":
+            self.proto_proj = nn.Conv2d(
+                self.embed_dim,
+                proto_dim,
+                kernel_size=1,
+                bias=False,
+            )
+        elif protoproj_id == "none":
+            if proto_dim != self.embed_dim:
+                raise ValueError(
+                    "If protoproj_id is 'none', proto_dim must be equal to embed_dim"
+                )
+            self.proto_proj = nn.Identity()
+        else:
+            raise ValueError(f"Unsupported protoproj_id={protoproj_id}")
 
         self.head_b_aux = (
             nn.Conv2d(self.embed_dim, self.num_pattern_classes + 1, kernel_size=1)
@@ -838,6 +860,9 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
         proto_input = feat.detach() if self.detach_proto_features else feat
         proto_feat = self.proto_proj(proto_input)
 
+        if self.center_per_image:
+            proto_feat = proto_feat - proto_feat.mean(dim=[2, 3], keepdim=True)
+
         if ctx.get("center") is not None:
             proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
 
@@ -885,6 +910,9 @@ class TwoStagesCompartmentPrototypeDecoder(Encoder):
                 size=(h, w),
                 mode="nearest",
             )
+
+        if self.center_per_image:
+            proto_feat = proto_feat - proto_feat.mean(dim=[2, 3], keepdim=True)
 
         if self.center:
             center = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(dim=0)
@@ -1636,6 +1664,7 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
         discard_last_mlp: bool = False,
         discard_last_block: bool = False,
         center: bool = True,
+        center_per_image: bool = False,
         num_compartments: int = 16,
         proto_dim: int = 256,
         num_pattern_classes: int = 6,
@@ -1649,6 +1678,7 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
         kmeans_iters: int = 10,
         kmeans_sample_limit: int = 2048,
         kmeans_weight_thresh: float = 1e-3,
+        protoproj_id: str = "linear",
         class_logit_pool: str = "logsumexp",
     ) -> None:
         super().__init__(
@@ -1659,6 +1689,7 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
             discard_last_mlp=discard_last_mlp,
             discard_last_block=discard_last_block,
             center=center,
+            center_per_image=center_per_image,
             num_compartments=num_compartments,
             proto_dim=proto_dim,
             num_pattern_classes=num_pattern_classes,
@@ -1668,6 +1699,7 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
             use_aux_b_head=use_aux_b_head,
             detach_preseg_input=detach_preseg_input,
             detach_proto_features=detach_proto_features,
+            protoproj_id=protoproj_id,
         )
 
         self.num_local_prototypes = int(num_local_prototypes)
@@ -1683,15 +1715,7 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
         if self.class_logit_pool not in {"logsumexp", "max", "mean"}:
             raise ValueError("class_logit_pool must be one of: logsumexp, max, mean")
 
-        # Replace ProtoProjLite by a linear projection.
-        self.proto_proj = nn.Conv2d(
-            self.embed_dim,
-            proto_dim,
-            kernel_size=1,
-            bias=False,
-        )
-
-    # --------------------------------------------------------
+   # --------------------------------------------------------
     # helpers
     # --------------------------------------------------------
     def _empty_ctx(
@@ -1854,6 +1878,9 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
         proto_input = feat.detach() if self.detach_proto_features else feat
         proto_feat = self.proto_proj(proto_input)
 
+        if self.center_per_image:
+            proto_feat = proto_feat - proto_feat.mean(dim=(2, 3), keepdim=True)
+
         if ctx.get("center") is not None:
             proto_feat = proto_feat - ctx["center"].view(1, -1, 1, 1)
 
@@ -1914,7 +1941,10 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
                 mode="nearest",
             )
 
-        if self.center:
+        if self.center_per_image:
+            proto_feat = proto_feat - proto_feat.mean(dim=(2, 3), keepdim=True)
+            center = None
+        elif self.center:
             center = proto_feat.permute(0, 2, 3, 1).reshape(-1, d).mean(dim=0)
             proto_feat = proto_feat - center.view(1, -1, 1, 1)
         else:
@@ -1984,3 +2014,220 @@ class TwoStagesCompartmentPrototypeDecoderLocalKMeans(
         if center is not None:
             ctx["center"] = center
         return ctx
+
+
+class TwoStagesCompartmentPrototypeDecoderLocalKMeansOpenSet(
+    TwoStagesCompartmentPrototypeDecoderLocalKMeans
+):
+    """
+    Local-kmeans prototype decoder with an extra episodic unknown logit.
+
+    For an episode containing K supported foreground classes:
+        logits_b_known: [B, K, H, W]
+        logits_b_open:  [B, K+1, H, W]
+    where the last channel is the learned "unknown foreground" logit.
+
+    Intended training regime:
+    - class dropout on support
+    - supported query fg pixels -> known class channels
+    - unsupported query fg pixels -> unknown channel
+    - background handled by preseg, ignored in head B loss
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder_id: str = "h0-mini",
+        img_size: tuple[int, int] = (448, 448),
+        ckpt_path: str = "",
+        sub_norm: bool = False,
+        discard_last_mlp: bool = False,
+        discard_last_block: bool = False,
+        center: bool = True,
+        center_per_image: bool = False,
+        num_compartments: int = 16,
+        proto_dim: int = 256,
+        num_pattern_classes: int = 6,
+        temperature_init: float = 20.0,
+        learnable_temp: bool = False,
+        eps: float = 1e-6,
+        use_aux_b_head: bool = False,
+        detach_preseg_input: bool = True,
+        detach_proto_features: bool = True,
+        num_local_prototypes: int = 4,
+        kmeans_iters: int = 10,
+        kmeans_sample_limit: int = 2048,
+        kmeans_weight_thresh: float = 1e-3,
+        class_logit_pool: str = "logsumexp",
+        unknown_mode: str = "max",
+        unknown_init_bias: float = 0.0,
+        unknown_init_scale: float = 1.0,
+        protoproj_id: str = "linear",
+    ) -> None:
+        super().__init__(
+            encoder_id=encoder_id,
+            img_size=img_size,
+            ckpt_path=ckpt_path,
+            sub_norm=sub_norm,
+            discard_last_mlp=discard_last_mlp,
+            discard_last_block=discard_last_block,
+            center=center,
+            center_per_image=center_per_image,
+            num_compartments=num_compartments,
+            proto_dim=proto_dim,
+            num_pattern_classes=num_pattern_classes,
+            temperature_init=temperature_init,
+            learnable_temp=learnable_temp,
+            eps=eps,
+            use_aux_b_head=use_aux_b_head,
+            detach_preseg_input=detach_preseg_input,
+            detach_proto_features=detach_proto_features,
+            num_local_prototypes=num_local_prototypes,
+            kmeans_iters=kmeans_iters,
+            kmeans_sample_limit=kmeans_sample_limit,
+            kmeans_weight_thresh=kmeans_weight_thresh,
+            class_logit_pool=class_logit_pool,
+            protoproj_id=protoproj_id,
+        )
+
+        if unknown_mode not in {"max", "max_margin"}:
+            raise ValueError("unknown_mode must be 'max' or 'max_margin'")
+        self.unknown_mode = unknown_mode
+
+        # unknown_logit = bias - scale * confidence_term
+        # scale is constrained positive
+        self.unknown_bias = nn.Parameter(torch.tensor(float(unknown_init_bias)))
+        self.unknown_log_scale = nn.Parameter(
+            torch.log(torch.tensor(float(unknown_init_scale)))
+        )
+
+        if unknown_mode == "max_margin":
+            self.unknown_margin_weight = nn.Parameter(torch.tensor(1.0))
+
+    def _compute_unknown_logit(self, logits_b_known: torch.Tensor) -> torch.Tensor:
+        """
+        logits_b_known: [B, K, H, W]
+        returns:
+            unknown_logit: [B, 1, H, W]
+        """
+        if logits_b_known.shape[1] == 0:
+            # no supported class in the episode -> everything is unknown fg
+            b, _, h, w = logits_b_known.shape
+            return logits_b_known.new_full((b, 1, h, w), self.unknown_bias)
+
+        scale = F.softplus(self.unknown_log_scale)
+
+        top1 = logits_b_known.max(dim=1, keepdim=True).values  # [B,1,H,W]
+        unknown_logit = self.unknown_bias - scale * top1
+
+        if self.unknown_mode == "max_margin" and logits_b_known.shape[1] >= 2:
+            top2 = torch.topk(logits_b_known, k=2, dim=1).values
+            margin = top2[:, 0:1] - top2[:, 1:2]  # [B,1,H,W]
+            unknown_logit = unknown_logit - self.unknown_margin_weight * margin
+
+        return unknown_logit
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        ctx: dict[str, torch.Tensor] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        out = super().forward(x, ctx=ctx)
+
+        if ctx is None:
+            return out
+
+        logits_b_known = out["logits_b"]  # [B,K,H,W]
+        unknown_logit = self._compute_unknown_logit(logits_b_known)  # [B,1,H,W]
+        logits_b_open = torch.cat([logits_b_known, unknown_logit], dim=1)
+
+        out["logits_b_known"] = logits_b_known
+        out["logits_b_unknown"] = unknown_logit
+        out["logits_b"] = logits_b_open
+        out["unknown_index_b"] = torch.tensor(
+            logits_b_open.shape[1] - 1,
+            dtype=torch.long,
+            device=logits_b_open.device,
+        )
+        return out
+
+    @torch.no_grad()
+    def predict_segmentation(
+        self,
+        out: dict[str, torch.Tensor],
+        fg_threshold: float = 0.5,
+        unknown_label: int | None = None,
+    ) -> torch.Tensor:
+        """
+        Full semantic prediction.
+
+        Returns:
+            pred: [B,H,W]
+                0 = background
+                1..K = supported pattern classes (episode-local indexing shifted by +1)
+                unknown_label if provided for unsupported fg, otherwise 0
+        """
+        fg_prob = out["fg_prob"]  # [B,1,H,W]
+        logits_b = out["logits_b"]  # [B,K+1,H,W]
+        unknown_idx = int(out["unknown_index_b"].item())
+
+        pred_local = torch.argmax(logits_b, dim=1)  # [B,H,W], in [0..K]
+        pred = pred_local + 1
+
+        is_fg = fg_prob[:, 0] >= fg_threshold
+        pred[~is_fg] = 0
+
+        reject = is_fg & (pred_local == unknown_idx)
+        pred[reject] = 0 if unknown_label is None else unknown_label
+
+        return pred
+
+    def make_episode_pattern_targets_with_unknown(
+        self,
+        pattern_targets: torch.Tensor,  # [B,H,W], 0=bg, 1..C=patterns
+        support_label_ids: torch.Tensor,  # [K_supported], global labels present in support
+        ignore_index: int,
+    ) -> torch.Tensor:
+        """
+        Remap full query pattern targets into episode-local targets for logits_b_open.
+
+        Input:
+            pattern_targets:
+                0 = background
+                1..C = global pattern labels
+                ignore_index = ignore
+            support_label_ids:
+                global labels present in support, e.g. tensor([1, 5])
+
+        Output:
+            local_targets:
+                0..K-1   -> supported classes in the episode
+                K        -> unknown foreground (GT fg class absent from support)
+                ignore   -> background and ignore pixels
+        """
+        device = pattern_targets.device
+        support_label_ids = support_label_ids.to(device=device, dtype=torch.long)
+
+        num_supported = int(support_label_ids.numel())
+        unknown_idx = num_supported
+
+        local_targets = torch.full_like(pattern_targets, fill_value=ignore_index)
+
+        valid_fg = (pattern_targets > 0) & (pattern_targets != ignore_index)
+
+        if num_supported == 0:
+            local_targets[valid_fg] = unknown_idx
+            return local_targets
+
+        for local_idx, global_lab in enumerate(support_label_ids.tolist()):
+            mask = pattern_targets == int(global_lab)
+            local_targets[mask] = int(local_idx)
+
+        supported_mask = torch.zeros_like(valid_fg, dtype=torch.bool)
+        for global_lab in support_label_ids.tolist():
+            supported_mask |= pattern_targets == int(global_lab)
+
+        unknown_fg_mask = valid_fg & (~supported_mask)
+        local_targets[unknown_fg_mask] = unknown_idx
+
+        return local_targets

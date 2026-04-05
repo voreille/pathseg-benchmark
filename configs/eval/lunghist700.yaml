@@ -4,7 +4,7 @@ trainer:
   callbacks:
   - class_path: pathseg.external_eval.callbacks.SavePrototypeROIPredictionsCallback
     init_args:
-      out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/lunghist700/test/
+      out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/lunghist700/test_scc_4su3gsjh/
       num_classes_b: 7
       num_classes_a: 16
       save_figures: true
@@ -19,7 +19,7 @@ data:
   init_args:
     root: /home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/LungHist700_20x
     metadata_csv: /home/valentin/workspaces/pathseg-benchmark/data/external_val/LungHist700/metadata_formatted.csv
-    superclass: "aca"
+    superclass: "scc"
     batch_size: 4
     num_workers: 4
     img_size: [896, 896]

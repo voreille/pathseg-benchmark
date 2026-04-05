@@ -14,9 +14,9 @@ from PIL import Image
 from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
+from pathseg.training.histo_loss import BCEDiceLoss, CrossEntropyDiceLoss
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
-from pathseg.training.histo_loss import CrossEntropyDiceLoss, BCEDiceLoss
 
 
 class TwoHeadSemanticWithSupport(LightningModule):
@@ -1373,6 +1373,556 @@ class TwoHeadSemanticWithSupportWithPreseg(TwoHeadSemanticWithSupport):
         plt.close(fig)
         buf.seek(0)
         return Image.open(buf)
+
+
+class TwoHeadSemanticWithSupportWithPresegOpenSet(TwoHeadSemanticWithSupportWithPreseg):
+    """
+    Open-set episodic training with class dropout on the support set.
+
+    Expected network API
+    --------------------
+    The network should be an open-set prototype decoder exposing:
+      - fit_prototypes(...)
+      - fit_prototypes_from_image_labels(...)
+      - make_episode_pattern_targets_with_unknown(...)
+      - forward(..., ctx=...) returning:
+          out["logits_b"]        : [B, K_ep + 1, H, W]  (known classes + unknown)
+          out["label_ids_b"]     : [K_ep] global labels kept in support
+          out["unknown_index_b"] : scalar tensor = K_ep
+
+    Semantics
+    ---------
+    - background is still handled by preseg
+    - head B is trained only on foreground pixels:
+        * supported fg classes -> mapped to episode-local labels [0..K_ep-1]
+        * unsupported fg classes -> mapped to unknown class [K_ep]
+        * background / ignore -> ignore_index
+    """
+
+    def __init__(
+        self,
+        *args,
+        enable_class_dropout_train: bool = True,
+        min_keep_classes: int = 2,
+        keep_all_prob: float = 0.3,
+        unknown_label_eval: int = 16,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        self.enable_class_dropout_train = bool(enable_class_dropout_train)
+        self.min_keep_classes = int(min_keep_classes)
+        self.keep_all_prob = float(keep_all_prob)
+        self.unknown_label_eval = int(unknown_label_eval)
+
+        if self.min_keep_classes < 1:
+            raise ValueError("min_keep_classes must be >= 1")
+
+        if not hasattr(self.network, "make_episode_pattern_targets_with_unknown"):
+            raise ValueError(
+                "network must implement make_episode_pattern_targets_with_unknown()"
+            )
+
+    # ------------------------------------------------------------------
+    # Support / class-dropout helpers
+    # ------------------------------------------------------------------
+    def _present_support_labels_from_pattern_targets(
+        self,
+        pattern_targets: torch.Tensor,  # [S, K+1, H, W], ch 0 = bg
+    ) -> torch.Tensor:
+        present = []
+        num_classes = pattern_targets.shape[1]
+        for c in range(1, num_classes):  # skip bg channel 0
+            if torch.any(pattern_targets[:, c] > 0):
+                present.append(c)
+        if len(present) == 0:
+            return torch.empty(0, dtype=torch.long, device=pattern_targets.device)
+        return torch.tensor(present, dtype=torch.long, device=pattern_targets.device)
+
+    def _sample_kept_support_labels(
+        self,
+        present_label_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Sample which foreground classes remain visible in support for this episode.
+        Sampling is done from the labels actually present in the current support batch.
+        """
+        m = int(present_label_ids.numel())
+        if m == 0:
+            return present_label_ids
+
+        if (not self.enable_class_dropout_train) or (m <= self.min_keep_classes):
+            return present_label_ids
+
+        if torch.rand(()) < self.keep_all_prob:
+            return present_label_ids
+
+        min_keep = min(self.min_keep_classes, m)
+        n_keep = int(torch.randint(low=min_keep, high=m, size=(1,)).item())
+
+        perm = torch.randperm(m, device=present_label_ids.device)
+        kept = present_label_ids[perm[:n_keep]]
+        kept, _ = torch.sort(kept)
+        return kept
+
+    def _apply_support_class_dropout(
+        self,
+        pattern_targets: torch.Tensor,  # [S, K+1, H, W]
+        kept_label_ids: torch.Tensor,  # global fg labels to keep
+    ) -> torch.Tensor:
+        """
+        Zero out dropped foreground channels in support targets.
+        Background channel 0 is kept unchanged.
+        """
+        dropped = pattern_targets.clone()
+
+        keep_mask = torch.zeros(
+            pattern_targets.shape[1],
+            dtype=torch.bool,
+            device=pattern_targets.device,
+        )
+        keep_mask[0] = True  # keep background channel
+        if kept_label_ids.numel() > 0:
+            keep_mask[kept_label_ids] = True
+
+        dropped[:, ~keep_mask] = 0.0
+        return dropped
+
+    # ------------------------------------------------------------------
+    # Override ctx building: class dropout only for train semantic support
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def _build_ctx(self, stage: str):
+        batch = self._next_support_batch(stage)
+
+        if len(batch) == 3:
+            images, targets, _image_ids = batch
+        elif len(batch) == 2:
+            images, targets = batch
+        else:
+            raise ValueError(f"Unexpected support batch format: len={len(batch)}")
+
+        if not torch.is_tensor(images):
+            images = torch.stack(list(images), dim=0)
+        images = images.to(self.device)
+
+        mode = self._infer_support_mode(targets)
+
+        if mode == "semantic":
+            h_out, w_out = self.network.grid_size
+            pattern_targets = self.preprocess_support_pattern_masks(
+                targets=list(targets),
+                out_hw=(h_out, w_out),
+                num_classes=self.num_classes_b,
+            ).to(self.device)
+
+            if stage == "train" and self.enable_class_dropout_train:
+                present_label_ids = self._present_support_labels_from_pattern_targets(
+                    pattern_targets
+                )
+                kept_label_ids = self._sample_kept_support_labels(present_label_ids)
+                pattern_targets = self._apply_support_class_dropout(
+                    pattern_targets=pattern_targets,
+                    kept_label_ids=kept_label_ids,
+                )
+
+            ctx = self.network.fit_prototypes(
+                support_images=images,
+                pattern_targets=pattern_targets,
+            )
+            return ctx
+
+        if mode == "image_label":
+            # For image-label support, class dropout is also possible, but your current
+            # setup seems semantic-mask based, so keep it simple here.
+            image_labels = torch.as_tensor(
+                targets, dtype=torch.long, device=self.device
+            )
+
+            if stage == "train" and self.enable_class_dropout_train:
+                present = torch.unique(image_labels, sorted=True)
+                kept = self._sample_kept_support_labels(present)
+                keep_mask = torch.zeros_like(image_labels, dtype=torch.bool)
+                for lab in kept.tolist():
+                    keep_mask |= image_labels == int(lab)
+
+                images = images[keep_mask]
+                image_labels = image_labels[keep_mask]
+
+            return self.network.fit_prototypes_from_image_labels(
+                images=images,
+                image_labels=image_labels,
+            )
+
+        raise RuntimeError(f"Unhandled support mode: {mode}")
+
+    # ------------------------------------------------------------------
+    # Open-set B loss
+    # ------------------------------------------------------------------
+    def _loss_on_subset_proto_preseg_open_set(
+        self,
+        logits_b: torch.Tensor,  # [B, K_ep + 1, H, W]
+        label_ids_b: torch.Tensor,  # [K_ep] global support labels kept this episode
+        targets_list,
+        subset_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if subset_mask.sum().item() == 0:
+            return torch.zeros((), device=logits_b.device)
+
+        logits_s = logits_b[subset_mask]
+        targets_s = self._select(targets_list, subset_mask)
+        targets_pp = self._targets_to_tensor(targets_s, logits_b.device)  # [B,H,W]
+
+        # network remaps:
+        #   supported fg -> 0..K_ep-1
+        #   unsupported fg -> K_ep (unknown)
+        #   background / ignore -> ignore_idx
+        targets_local = self.network.make_episode_pattern_targets_with_unknown(
+            pattern_targets=targets_pp,
+            support_label_ids=label_ids_b,
+            ignore_index=self.ignore_idx,
+        )
+
+        return self.criterion_b_proto(logits_s, targets_local)
+
+    # ------------------------------------------------------------------
+    # Prediction helpers for episodic open-set logits
+    # ------------------------------------------------------------------
+    def _predict_b_single_open_set(
+        self,
+        logits_b: torch.Tensor,  # [K_ep + 1, H, W]
+        logits_preseg: torch.Tensor,  # [1, H, W]
+        label_ids_b: torch.Tensor,  # [K_ep] global labels
+        fg_threshold: float | None = None,
+        unknown_label: int | None = None,
+    ) -> torch.Tensor:
+        """
+        Returns global pattern labels:
+          0 = background
+          label_ids_b[i] = known class i
+          unknown -> unknown_label (default self.unknown_label_eval)
+        """
+        if fg_threshold is None:
+            fg_threshold = self.fg_threshold
+        if unknown_label is None:
+            unknown_label = self.unknown_label_eval
+
+        fg_prob = torch.sigmoid(logits_preseg)[0]  # [H,W]
+        pred_local = torch.argmax(logits_b, dim=0)  # [H,W]
+        unknown_idx = logits_b.shape[0] - 1
+
+        pred = torch.full_like(pred_local, fill_value=unknown_label)
+
+        # map known local ids -> global labels
+        for local_idx, global_lab in enumerate(label_ids_b.tolist()):
+            pred[pred_local == int(local_idx)] = int(global_lab)
+
+        # unknown channel
+        pred[pred_local == unknown_idx] = int(unknown_label)
+
+        # preseg decides background
+        pred[fg_prob < fg_threshold] = 0
+        return pred
+
+    # ------------------------------------------------------------------
+    # Training
+    # ------------------------------------------------------------------
+    def training_step(self, batch, batch_idx):
+        imgs, targets, source_ids, _image_ids = batch
+        source_ids = source_ids.to(imgs.device)
+
+        if self.use_fixed_loss_weight_b is None:
+            w_b = self._get_loss_weight_b() * self.loss_weight_b
+        else:
+            w_b = float(self.use_fixed_loss_weight_b)
+
+        m_a = source_ids == self.source_id_a
+        m_b = source_ids == self.source_id_b
+
+        if w_b == 0.0:
+            out = self(imgs, ctx=None)
+
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = torch.zeros((), device=imgs.device)
+            loss_total = self.loss_weight_a * loss_a
+            label_ids_b = torch.empty(0, dtype=torch.long, device=imgs.device)
+        else:
+            ctx = self._get_ctx("train")
+            out = self(imgs, ctx=ctx)
+
+            logits_a = F.interpolate(
+                out["logits_a"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            logits_b = F.interpolate(
+                out["logits_b"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )  # [B, K_ep + 1, H, W]
+
+            label_ids_b = out["label_ids_b"]
+
+            loss_a = self._loss_on_subset_fixed(
+                logits_a, targets, m_a, self.criterion_a
+            )
+            loss_b = self._loss_on_subset_proto_preseg_open_set(
+                logits_b=logits_b,
+                label_ids_b=label_ids_b,
+                targets_list=targets,
+                subset_mask=m_b,
+            )
+            loss_total = self.loss_weight_a * loss_a + w_b * loss_b
+
+        if out.get("logits_b_aux") is not None and m_b.any():
+            logits_b_aux = F.interpolate(
+                out["logits_b_aux"],
+                self.img_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            loss_b_aux = self._loss_on_subset_fixed(
+                logits_b_aux,
+                targets,
+                m_b,
+                self.criterion_b_aux,
+            )
+            self.log("train_loss_b_aux", loss_b_aux, sync_dist=True)
+            loss_total = loss_total + self.loss_weight_b_aux * loss_b_aux
+
+        logits_preseg = F.interpolate(
+            out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        loss_preseg = self._loss_on_preseg(
+            logits_preseg,
+            targets,
+            m_b,
+            self.criterion_preseg,
+        )
+        self.log("train_loss_preseg", loss_preseg, sync_dist=True)
+
+        loss_total = loss_total + self.loss_weight_preseg * loss_preseg
+
+        self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
+        self.log("train_loss_a", loss_a, sync_dist=True)
+        self.log("train_loss_b", loss_b, sync_dist=True)
+        self.log("train_frac_a", m_a.float().mean(), sync_dist=True)
+        self.log("train_frac_b", m_b.float().mean(), sync_dist=True)
+        self.log(
+            "train_num_support_labels",
+            torch.tensor(
+                label_ids_b.numel(),
+                device=imgs.device,
+                dtype=torch.float32,
+            ),
+            sync_dist=True,
+        )
+        self.log("loss_weight_b", w_b, prog_bar=False, sync_dist=True)
+
+        return loss_total
+
+    # ------------------------------------------------------------------
+    # Eval
+    # ------------------------------------------------------------------
+    def eval_step(
+        self,
+        batch,
+        batch_idx=None,
+        dataloader_idx=None,
+        log_prefix=None,
+    ):
+        imgs, targets, source_ids, image_ids = batch
+        sid0 = int(source_ids[0])
+
+        # no class dropout here because _build_ctx only drops for stage=="train"
+        ctx = self._get_ctx("val" if log_prefix == "val" else "test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        crop_logits_a = F.interpolate(
+            crop_out["logits_a"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_b = F.interpolate(
+            crop_out["logits_b"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_preseg = F.interpolate(
+            crop_out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a, origins, img_sizes
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b, origins, img_sizes
+        )
+        logits_preseg_list = self.revert_window_logits_semantic(
+            crop_logits_preseg, origins, img_sizes
+        )
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        if sid0 == self.source_id_a:
+            self.update_metrics(logits_a_list, targets_pp, dataloader_idx)
+        else:
+            label_ids_b = crop_out["label_ids_b"]
+            preds_b_list = [
+                self._predict_b_single_open_set(lb, lp, label_ids_b=label_ids_b)
+                for lb, lp in zip(logits_b_list, logits_preseg_list)
+            ]
+            self.update_metrics_with_predictions(
+                preds_b_list, targets_pp, dataloader_idx
+            )
+
+        if batch_idx == 0:
+            img0 = imgs[0]
+            tgt0 = targets_pp[0]
+
+            if sid0 == self.source_id_a:
+                pred_b0 = None
+            else:
+                pred_b0 = self._predict_b_single_open_set(
+                    logits_b_list[0],
+                    logits_preseg_list[0],
+                    label_ids_b=crop_out["label_ids_b"],
+                )
+
+            plot = self.plot_two_head_semantic(
+                img=img0,
+                logits_a=logits_a_list[0],
+                logits_b=None,
+                pred_b=pred_b0,
+                target=tgt0,
+                gt_head="a" if sid0 == self.source_id_a else "b",
+            )
+
+            self.log_wandb_image(
+                f"{log_prefix}_{dataloader_idx}_two_head_{batch_idx}",
+                plot,
+                commit=False,
+            )
+
+    # ------------------------------------------------------------------
+    # Predict
+    # ------------------------------------------------------------------
+    def predict_step(self, batch, batch_idx, dataloader_idx=0):
+        if len(batch) == 4:
+            imgs, targets, source_ids, img_ids = batch
+        elif len(batch) == 3:
+            imgs, targets, img_ids = batch
+            source_ids = None
+        elif len(batch) == 2:
+            imgs, img_ids = batch
+            targets = None
+            source_ids = None
+        else:
+            raise ValueError(f"Unexpected predict batch format: len={len(batch)}")
+
+        img_ids = list(img_ids)
+
+        if source_ids is not None:
+            if torch.is_tensor(source_ids):
+                source_ids = source_ids.to(self.device)
+            else:
+                source_ids = torch.as_tensor(
+                    source_ids, dtype=torch.long, device=self.device
+                )
+
+        ctx = self._get_ctx("test")
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops, ctx=ctx)
+
+        crop_logits_a = F.interpolate(
+            crop_out["logits_a"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_b = F.interpolate(
+            crop_out["logits_b"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+        crop_logits_preseg = F.interpolate(
+            crop_out["logits_preseg"],
+            self.img_size,
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a, origins, img_sizes
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b, origins, img_sizes
+        )
+        logits_preseg_list = self.revert_window_logits_semantic(
+            crop_logits_preseg, origins, img_sizes
+        )
+
+        label_ids_b = crop_out["label_ids_b"]
+
+        outs = []
+        for i, (logits_a, logits_b, logits_preseg) in enumerate(
+            zip(logits_a_list, logits_b_list, logits_preseg_list)
+        ):
+            pred_a = torch.argmax(logits_a, dim=0)
+            pred_b = self._predict_b_single_open_set(
+                logits_b,
+                logits_preseg,
+                label_ids_b=label_ids_b,
+            )
+            fg_prob = torch.sigmoid(logits_preseg)[0]
+
+            out_i = {
+                "img_id": img_ids[i],
+                "logits_b": logits_b.detach().cpu(),  # episodic logits incl unknown
+                "logits_preseg": logits_preseg.detach().cpu(),
+                "fg_prob": fg_prob.detach().cpu(),
+                "pred_b": pred_b.detach().cpu(),  # global labels + unknown_label_eval
+                "label_ids_b": label_ids_b.detach().cpu(),
+                "logits_a": logits_a.detach().cpu(),
+                "pred_a": pred_a.detach().cpu(),
+                "img_hw": tuple(int(x) for x in pred_b.shape[-2:]),
+                "dataloader_idx": int(dataloader_idx),
+                "img": imgs[i].detach().cpu(),
+            }
+
+            if targets is not None:
+                t = targets[i]
+                out_i["target"] = t.detach().cpu() if torch.is_tensor(t) else t
+
+            if source_ids is not None:
+                out_i["source_id"] = int(source_ids[i].item())
+
+            outs.append(out_i)
+
+        return outs
 
 
 class TwoHeadSemanticWithSupportTumorOnly(TwoHeadSemanticWithSupport):

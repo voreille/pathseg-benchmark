@@ -24,7 +24,7 @@ trainer:
       log_model: false
 
 model:
-  class_path: pathseg.training.prototype_multitask_semantic.TwoHeadSemanticWithSupportWithPreseg
+  class_path: pathseg.training.prototype_multitask_semantic.TwoHeadSemanticWithSupportWithPresegOpenSet
   init_args:
     freeze_encoder: false
     source_id_a: 0
@@ -36,9 +36,13 @@ model:
     support_every_n_steps: 10
     refresh_support_on_val: false
     num_classes_b: 7
-    # use_fixed_loss_weight_b: 1.0
+    enable_class_dropout_train: true
+    min_keep_classes: 2
+    keep_all_prob: 0.3
+    unknown_label_eval: 16
+    use_fixed_loss_weight_b: 1.0
     network:
-      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoderLocalKMeans
+      class_path: pathseg.models.compartment_prototype_decoder.TwoStagesCompartmentPrototypeDecoderLocalKMeansOpenSet
       init_args:
         encoder_id: "h0-mini"
         use_aux_b_head: true
@@ -46,9 +50,11 @@ model:
         num_compartments: 16
         num_pattern_classes: 6
         proto_dim: 256
-        center: true
+        center: false
+        center_per_image: true
         temperature_init: 5.0
-        num_local_prototypes: 4
+        num_local_prototypes: 3
+        protoproj_id: "linear"
 
     tiler:
       class_path: pathseg.training.tiler.GridPadTiler
