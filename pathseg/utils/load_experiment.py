@@ -68,15 +68,16 @@ def load_experiment(
     if ckpt_path is not None:
         init_args = dict(cli.config["model"]["init_args"])
 
-        # Ensure object-type args are the instantiated ones (NOT dicts)
-        # This is the crucial part for your current design.
-        init_args["network"] = model.network
+        clean_init_args = {k: v for k, v in init_args.items() if "." not in k}
+
+        clean_init_args["network"] = model.network
         if hasattr(model, "tiler"):
-            init_args["tiler"] = model.tiler
+            clean_init_args["tiler"] = model.tiler
 
         model = type(model).load_from_checkpoint(
             ckpt_path,
-            **init_args,
+            map_location="cpu",
+            **clean_init_args,
         )
 
     if device is not None:

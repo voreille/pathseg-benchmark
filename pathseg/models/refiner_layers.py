@@ -272,3 +272,413 @@ class ProtoProjGN(nn.Module):
         x = self.blocks(x)
         x = self.out_proj(x)
         return x + skip
+
+
+class ProtoProjMultiScale(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.reduce = nn.Conv2d(in_dim, out_dim, 1, bias=False)
+
+        self.dw3 = nn.Conv2d(out_dim, out_dim, 3, padding=1, groups=out_dim, bias=False)
+        self.dw7 = nn.Conv2d(out_dim, out_dim, 7, padding=3, groups=out_dim, bias=False)
+        self.dw11 = nn.Conv2d(
+            out_dim, out_dim, 11, padding=5, groups=out_dim, bias=False
+        )
+
+        self.fuse = nn.Conv2d(out_dim * 3, out_dim, 1, bias=False)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.reduce(x)
+        x3 = self.act(self.dw3(x))
+        x7 = self.act(self.dw7(x))
+        x11 = self.act(self.dw11(x))
+        x = torch.cat([x3, x7, x11], dim=1)
+        x = self.fuse(x)
+        return x
+
+
+class ProtoProjDilated(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.reduce = nn.Conv2d(in_dim, out_dim, 1, bias=False)
+
+        self.b1 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=1, dilation=1, groups=out_dim, bias=False
+        )
+        self.b2 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=2, dilation=2, groups=out_dim, bias=False
+        )
+        self.b4 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=4, dilation=4, groups=out_dim, bias=False
+        )
+        self.b8 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=8, dilation=8, groups=out_dim, bias=False
+        )
+
+        self.fuse = nn.Conv2d(out_dim * 4, out_dim, 1, bias=False)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.reduce(x)
+        y1 = self.act(self.b1(x))
+        y2 = self.act(self.b2(x))
+        y4 = self.act(self.b4(x))
+        y8 = self.act(self.b8(x))
+        y = torch.cat([y1, y2, y4, y8], dim=1)
+        y = self.fuse(y)
+        return y
+
+
+class ProtoProjMultiScaleRefined(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int, expansion: float = 2.0):
+        super().__init__()
+        hidden = int(out_dim * expansion)
+
+        self.reduce = nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False)
+
+        self.dw3 = nn.Conv2d(
+            out_dim, out_dim, kernel_size=3, padding=1, groups=out_dim, bias=False
+        )
+        self.dw7 = nn.Conv2d(
+            out_dim, out_dim, kernel_size=7, padding=3, groups=out_dim, bias=False
+        )
+        self.dw11 = nn.Conv2d(
+            out_dim, out_dim, kernel_size=11, padding=5, groups=out_dim, bias=False
+        )
+        self.dw15 = nn.Conv2d(
+            out_dim, out_dim, kernel_size=15, padding=7, groups=out_dim, bias=False
+        )
+
+        self.fuse = nn.Conv2d(out_dim * 4, out_dim, kernel_size=1, bias=False)
+
+        self.refine = nn.Sequential(
+            nn.Conv2d(out_dim, hidden, kernel_size=1, bias=False),
+            nn.GELU(),
+            nn.Conv2d(hidden, out_dim, kernel_size=1, bias=False),
+        )
+
+        self.act = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.reduce(x)
+
+        x3 = self.act(self.dw3(x))
+        x7 = self.act(self.dw7(x))
+        x11 = self.act(self.dw11(x))
+        x15 = self.act(self.dw15(x))
+
+        y = torch.cat([x3, x7, x11, x15], dim=1)
+        y = self.fuse(y)
+        y = y + self.refine(y)
+        return y
+
+
+class ProtoProjDilatedScaleAttn(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.reduce = nn.Conv2d(in_dim, out_dim, 1, bias=False)
+
+        self.b1 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=1, dilation=1, groups=out_dim, bias=False
+        )
+        self.b2 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=2, dilation=2, groups=out_dim, bias=False
+        )
+        self.b4 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=4, dilation=4, groups=out_dim, bias=False
+        )
+        self.b8 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=8, dilation=8, groups=out_dim, bias=False
+        )
+
+        self.act = nn.GELU()
+        self.scale_logits = nn.Parameter(torch.zeros(4))
+        self.fuse = nn.Conv2d(out_dim, out_dim, 1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.reduce(x)
+
+        y1 = self.act(self.b1(x))
+        y2 = self.act(self.b2(x))
+        y4 = self.act(self.b4(x))
+        y8 = self.act(self.b8(x))
+
+        w = torch.softmax(self.scale_logits, dim=0)
+        y = w[0] * y1 + w[1] * y2 + w[2] * y4 + w[3] * y8
+        y = self.fuse(y)
+        return y
+
+
+class ProtoProjDilatedSpatialScaleAttn(nn.Module):
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        self.reduce = nn.Conv2d(in_dim, out_dim, 1, bias=False)
+
+        self.b1 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=1, dilation=1, groups=out_dim, bias=False
+        )
+        self.b2 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=2, dilation=2, groups=out_dim, bias=False
+        )
+        self.b4 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=4, dilation=4, groups=out_dim, bias=False
+        )
+        self.b8 = nn.Conv2d(
+            out_dim, out_dim, 3, padding=8, dilation=8, groups=out_dim, bias=False
+        )
+
+        self.act = nn.GELU()
+
+        self.scale_attn = nn.Conv2d(out_dim * 4, 4, kernel_size=1, bias=True)
+        self.fuse = nn.Conv2d(out_dim, out_dim, kernel_size=1, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.reduce(x)
+
+        y1 = self.act(self.b1(x))
+        y2 = self.act(self.b2(x))
+        y4 = self.act(self.b4(x))
+        y8 = self.act(self.b8(x))
+
+        y_cat = torch.cat([y1, y2, y4, y8], dim=1)  # [B, 4C, H, W]
+        attn = torch.softmax(self.scale_attn(y_cat), dim=1)  # [B, 4, H, W]
+
+        y = (
+            attn[:, 0:1] * y1
+            + attn[:, 1:2] * y2
+            + attn[:, 2:3] * y4
+            + attn[:, 3:4] * y8
+        )
+        y = self.fuse(y)
+        return y
+
+
+class ProtoProjPSP(nn.Module):
+    """
+    PSP-like context head for prototype matching.
+
+    Idea
+    ----
+    Build a descriptor that mixes:
+    - local feature map
+    - coarse pooled context at several spatial scales
+
+    This is useful when prototype matching should depend on
+    broader morphology / architecture, not only very local texture.
+
+    Input:
+        x: [B, C_in, H, W]
+
+    Output:
+        y: [B, C_out, H, W]
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        pool_bins: tuple[int, ...] = (1, 2, 4, 8),
+        branch_dim: int | None = None,
+        use_residual_refine: bool = True,
+    ) -> None:
+        super().__init__()
+
+        self.in_dim = int(in_dim)
+        self.out_dim = int(out_dim)
+        self.pool_bins = tuple(int(x) for x in pool_bins)
+
+        if len(self.pool_bins) == 0:
+            raise ValueError("pool_bins must contain at least one value")
+
+        if branch_dim is None:
+            branch_dim = out_dim // 2
+        self.branch_dim = int(branch_dim)
+
+        if self.branch_dim < 1:
+            raise ValueError("branch_dim must be >= 1")
+
+        # local branch
+        self.reduce = nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False)
+
+        # pooled context branches
+        self.pool_projs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d((bin_size, bin_size)),
+                    nn.Conv2d(in_dim, self.branch_dim, kernel_size=1, bias=False),
+                    nn.GELU(),
+                )
+                for bin_size in self.pool_bins
+            ]
+        )
+
+        fuse_in_dim = out_dim + len(self.pool_bins) * self.branch_dim
+        self.fuse = nn.Sequential(
+            nn.Conv2d(fuse_in_dim, out_dim, kernel_size=1, bias=False),
+            nn.GELU(),
+        )
+
+        self.use_residual_refine = bool(use_residual_refine)
+        if self.use_residual_refine:
+            hidden_dim = max(out_dim, out_dim * 2)
+            self.refine = nn.Sequential(
+                nn.Conv2d(out_dim, hidden_dim, kernel_size=1, bias=False),
+                nn.GELU(),
+                nn.Conv2d(hidden_dim, out_dim, kernel_size=1, bias=False),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(
+                f"Expected x to have shape [B,C,H,W], got {tuple(x.shape)}"
+            )
+
+        h, w = x.shape[-2:]
+
+        local = self.reduce(x)
+        branches = [local]
+
+        for pool_proj in self.pool_projs:
+            pooled = pool_proj(x)  # [B, branch_dim, b, b]
+            pooled = F.interpolate(
+                pooled,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            branches.append(pooled)
+
+        y = torch.cat(branches, dim=1)
+        y = self.fuse(y)
+
+        if self.use_residual_refine:
+            y = y + self.refine(y)
+
+        return y
+
+
+class ProtoProjPSPAttention(nn.Module):
+    """
+    PSP-like prototype projection with spatial scale attention.
+
+    Input:
+        x: [B, C_in, H, W]
+
+    Output:
+        y: [B, C_out, H, W]
+
+    Structure
+    ---------
+    1. Local branch from full-resolution feature map
+    2. Several pooled context branches (PSP-like)
+    3. Upsample pooled branches back to HxW
+    4. Predict per-pixel attention over branches
+    5. Weighted sum of branches
+    6. Fuse + optional residual refine
+
+    Notes
+    -----
+    - All branches are projected to the same channel dimension (out_dim)
+    - Attention is spatial: each pixel chooses how much to use each scale
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        pool_bins: tuple[int, ...] = (1, 2, 4, 8),
+        use_residual_refine: bool = True,
+    ) -> None:
+        super().__init__()
+
+        self.in_dim = int(in_dim)
+        self.out_dim = int(out_dim)
+        self.pool_bins = tuple(int(x) for x in pool_bins)
+
+        if len(self.pool_bins) == 0:
+            raise ValueError("pool_bins must contain at least one value")
+
+        # Local full-resolution branch
+        self.local_proj = nn.Sequential(
+            nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False),
+            nn.GELU(),
+        )
+
+        # Pooled PSP branches
+        self.pool_projs = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d((bin_size, bin_size)),
+                    nn.Conv2d(in_dim, out_dim, kernel_size=1, bias=False),
+                    nn.GELU(),
+                )
+                for bin_size in self.pool_bins
+            ]
+        )
+
+        num_branches = 1 + len(self.pool_bins)  # local + pooled branches
+
+        # Predict per-pixel attention over scales
+        self.scale_attn = nn.Conv2d(
+            out_dim * num_branches,
+            num_branches,
+            kernel_size=1,
+            bias=True,
+        )
+
+        # Fuse attended context
+        self.fuse = nn.Sequential(
+            nn.Conv2d(out_dim, out_dim, kernel_size=1, bias=False),
+            nn.GELU(),
+        )
+
+        self.use_residual_refine = bool(use_residual_refine)
+        if self.use_residual_refine:
+            hidden_dim = max(out_dim, out_dim * 2)
+            self.refine = nn.Sequential(
+                nn.Conv2d(out_dim, hidden_dim, kernel_size=1, bias=False),
+                nn.GELU(),
+                nn.Conv2d(hidden_dim, out_dim, kernel_size=1, bias=False),
+            )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 4:
+            raise ValueError(f"Expected x with shape [B,C,H,W], got {tuple(x.shape)}")
+
+        h, w = x.shape[-2:]
+
+        branches = []
+
+        # Local branch
+        local = self.local_proj(x)  # [B, out_dim, H, W]
+        branches.append(local)
+
+        # PSP branches
+        for pool_proj in self.pool_projs:
+            pooled = pool_proj(x)  # [B, out_dim, b, b]
+            pooled = F.interpolate(
+                pooled,
+                size=(h, w),
+                mode="bilinear",
+                align_corners=False,
+            )
+            branches.append(pooled)
+
+        # [B, num_branches*out_dim, H, W]
+        stacked_for_attn = torch.cat(branches, dim=1)
+
+        # [B, num_branches, H, W]
+        attn = torch.softmax(self.scale_attn(stacked_for_attn), dim=1)
+
+        # Weighted sum over branches
+        y = 0.0
+        for i, b in enumerate(branches):
+            y = y + attn[:, i : i + 1] * b
+
+        y = self.fuse(y)
+
+        if self.use_residual_refine:
+            y = y + self.refine(y)
+
+        return y
