@@ -11,7 +11,16 @@ trainer:
       group: ANORAK
       job_type: baseline
       tags:
-        ["baseline", "wahoo", "20x", "896x896", "ANORAK+IGNITE", "multitask", "UNETR-like"]
+        [
+          "baseline",
+          "shark",
+          "20x",
+          "896x896",
+          "ANORAK+IGNITE",
+          "multitask",
+          "linear_decoder",
+          "histo_aug_v1",
+        ]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
@@ -22,8 +31,8 @@ model:
     source_id_b: 1
     num_metrics: 2
     network:
-      class_path: pathseg.models.multitask_unetr.TwoHeadViTPyramidSeg
-      # class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
+      # class_path: pathseg.models.multitask_unetr.TwoHeadViTPyramidSeg
+      class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
       init_args:
         encoder_id: "h0-mini"
         num_classes_a: 16
@@ -47,6 +56,7 @@ data:
         split_csv: "metadata.csv"
         source_id: 0
         num_classes: 16
+        fold: 0
       - name: ANORAK
         root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
         images_subdir: "images"
@@ -54,23 +64,24 @@ data:
         split_csv: "split.csv"
         source_id: 1
         num_classes: 7
+        fold: 0
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0
     batch_size: 4
     epoch_repeat: 30
     transforms:
-      # class_path: pathseg.datasets.transforms.HistoTransforms
-      class_path: pathseg.datasets.transforms.CustomTransforms
+      class_path: pathseg.datasets.transforms.HistoTransforms
+      # class_path: pathseg.datasets.transforms.CustomTransforms
       init_args:
         img_size: [896, 896]
         scale_range: [0.8, 1.2]
-        # hed_p: 0.3
-        # hed_h_shift_limit: 0.02
-        # hed_e_shift_limit: 0.02
-        # hsv_p: 0.1
-        # hsv_hue_shift_limit: 0.02
-        # hsv_sat_scale_limit: 0.05
-        # hsv_val_scale_limit: 0.05
-        # max_brightness_delta: 16
-        # max_contrast_factor: 0.15
+        hed_p: 0.3
+        hed_h_shift_limit: 0.02
+        hed_e_shift_limit: 0.02
+        hsv_p: 0.1
+        hsv_hue_shift_limit: 0.02
+        hsv_sat_scale_limit: 0.05
+        hsv_val_scale_limit: 0.05
+        max_brightness_delta: 16
+        max_contrast_factor: 0.15
