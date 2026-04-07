@@ -4,7 +4,7 @@ trainer:
   callbacks:
     - class_path: pathseg.external_eval.callbacks.SavePrototypeROIPredictionsCallback
       init_args:
-        out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/anorak_ignite/test
+        out_dir: /home/valentin/workspaces/pathseg-benchmark/reports/figures/anorak_ignite/test_h81cvddi
         num_classes_b: 7
         num_classes_a: 16
         save_figures: true
