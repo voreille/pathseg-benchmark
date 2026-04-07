@@ -1,9 +1,9 @@
 trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
-  val_check_interval: 4000
+  val_check_interval: 1000
   check_val_every_n_epoch: null
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -56,6 +56,7 @@ data:
         split_csv: "metadata.csv"
         source_id: 0
         num_classes: 16
+        sampling_weight: 1.0
         fold: 0
       - name: ANORAK
         root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
@@ -64,12 +65,12 @@ data:
         split_csv: "split.csv"
         source_id: 1
         num_classes: 7
+        sampling_weight: 1.0
         fold: 0
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0
-    batch_size: 4
-    epoch_repeat: 30
+    batch_size: 16
     transforms:
       class_path: pathseg.datasets.transforms.HistoTransforms
       # class_path: pathseg.datasets.transforms.CustomTransforms

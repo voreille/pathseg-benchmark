@@ -1,4 +1,3 @@
-# pathseg/datasets/multitask_concat_datamodule.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -8,18 +7,21 @@ import pandas as pd
 import torch
 from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
-from torch.utils.data import ConcatDataset, DataLoader, Dataset as TorchDataset
+from torch.utils.data import (
+    ConcatDataset,
+    DataLoader,
+    Dataset as TorchDataset,
+    WeightedRandomSampler,
+)
 
 from pathseg.datasets.dataset import Dataset as BaseDataset
 from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.datasets.transforms import CustomTransforms
-from pathseg.datasets.utils import RepeatDataset
 
 
 class WrapWithSource(TorchDataset):
     """
     Wrap a base dataset and add a per-sample source_id.
-    Does NOT touch/convert targets.
 
     Expected base dataset outputs:
       - (image, target) OR
@@ -57,35 +59,8 @@ class MultiTaskConcatDataModule(LightningDataModule):
     """
     Multi-dataset datamodule that mixes datasets within a batch using ConcatDataset.
 
-    Config-friendly: datasets is a list of dicts, e.g.
-      datasets = [
-        {
-          "name": "compartments",
-          "root": "/path/to/A",
-          "images_subdir": "images",
-          "masks_subdir": "masks_semantic",
-          "split_csv": "split.csv",
-          "source_id": 0,
-          "num_classes": 5,
-          "fold": 0,
-        },
-        {
-          "name": "patterns",
-          "root": "/path/to/B",
-          "images_subdir": "images",
-          "masks_subdir": "masks_patterns",
-          "split_csv": "split.csv",
-          "source_id": 1,
-          "num_classes": 5,
-          "fold": 0,
-        },
-      ]
-
-    Notes:
-    - This datamodule does NOT interpret targets. Your LightningModule does.
-    - train_dataloader returns ONE loader (ConcatDataset), so batches can mix sources.
-    - val/test/predict return a LIST of loaders (one per dataset) to keep splits separable.
-      (If you prefer a single concat val loader, say so; easy change.)
+    Training uses a WeightedRandomSampler so epoch length is controlled by
+    num_iterations_per_epoch rather than dataset repetition.
     """
 
     def __init__(
@@ -101,7 +76,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         transforms: Optional[nn.Module] = None,
         val_transforms: Optional[nn.Module] = None,
         return_background_mask: bool = True,
-        epoch_repeat: int = 1,
+        num_iterations_per_epoch: int = 1500,
     ) -> None:
         super().__init__(
             root="",
@@ -118,8 +93,14 @@ class MultiTaskConcatDataModule(LightningDataModule):
             raise ValueError("datasets must be a list with at least two dataset dicts.")
 
         self.datasets_cfg = datasets
-        self.epoch_repeat = int(epoch_repeat)
         self.return_background_mask = bool(return_background_mask)
+
+        self.num_iterations_per_epoch = int(num_iterations_per_epoch)
+        if self.num_iterations_per_epoch <= 0:
+            raise ValueError("num_iterations_per_epoch must be > 0")
+
+        self.num_samples_per_epoch = self.num_iterations_per_epoch * batch_size
+
         self.val_dataloader_kwargs = self.dataloader_kwargs.copy()
         self.val_dataloader_kwargs["batch_size"] = val_batch_size
 
@@ -135,14 +116,16 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self.val_transforms = val_transforms
 
         rank_zero_info(f"[MultiTaskConcatDataModule] batch_size={batch_size}")
+        rank_zero_info(
+            f"[MultiTaskConcatDataModule] num_iterations_per_epoch={self.num_iterations_per_epoch}"
+        )
         for d in self.datasets_cfg:
             rank_zero_info(
-                f"[MultiTaskConcatDataModule] dataset={d.get('name', '?')} root={d['root']} source_id={d.get('source_id')}"
+                f"[MultiTaskConcatDataModule] dataset={d.get('name', '?')} "
+                f"root={d['root']} source_id={d.get('source_id')} "
+                f"sampling_weight={d.get('sampling_weight', 1.0)}"
             )
 
-    # -------------------------
-    # Split helpers
-    # -------------------------
     @staticmethod
     def _read_split_csv(csv_path: Path) -> pd.DataFrame:
         if not csv_path.exists():
@@ -194,19 +177,37 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
         raise ValueError(f"Unknown stage: {stage}")
 
-    # -------------------------
-    # Collates (mixed sources)
-    # -------------------------
+    def _build_train_sampler(self) -> WeightedRandomSampler:
+        if not isinstance(self.train_dataset, ConcatDataset):
+            raise TypeError("train_dataset must be a ConcatDataset.")
+
+        sample_weights: list[float] = []
+
+        for dcfg, subdataset in zip(self.datasets_cfg, self.train_dataset.datasets):
+            ds_weight = float(dcfg.get("sampling_weight", 1.0))
+            if ds_weight <= 0:
+                raise ValueError(
+                    f"sampling_weight must be > 0 for dataset {dcfg.get('name', '?')}"
+                )
+
+            n = len(subdataset)
+            if n == 0:
+                raise ValueError(
+                    f"Dataset {dcfg.get('name', '?')} has zero training samples."
+                )
+
+            # Equal total probability mass per dataset if all sampling_weight=1.0
+            per_sample_weight = ds_weight / n
+            sample_weights.extend([per_sample_weight] * n)
+
+        return WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=self.num_samples_per_epoch,
+            replacement=True,
+        )
+
     @staticmethod
     def train_collate(batch):
-        """
-        batch items: (img, target, source_id, image_id)
-        Returns:
-          imgs: Tensor[B, ...]
-          targets: list[Any]  (untouched)
-          source_ids: LongTensor[B]
-          image_ids: list[str]
-        """
         imgs, targets, source_ids, image_ids = [], [], [], []
 
         for img, target, source_id, image_id in batch:
@@ -224,15 +225,8 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
     @staticmethod
     def eval_collate(batch):
-        """
-        Returns tuples: (imgs, targets, source_ids, image_ids)
-        (keeps targets untouched and avoids stacking if you prefer)
-        """
         return tuple(zip(*batch))
 
-    # -------------------------
-    # Setup
-    # -------------------------
     def setup(self, stage: Union[str, None] = None) -> "MultiTaskConcatDataModule":
         train_wrapped = []
         self.val_wrapped = []
@@ -283,50 +277,32 @@ class MultiTaskConcatDataModule(LightningDataModule):
                 )
 
             if stage in ("predict", None):
-                # predict on val+test for each dataset (adjust if you want only test)
                 base_val_p = self._make_base_dataset(
                     ids=val_ids,
                     images_dir=images_dir,
                     masks_dir=masks_dir,
                     stage="predict",
                 )
-                # base_test_p = self._make_base_dataset(
-                #     ids=test_ids,
-                #     images_dir=images_dir,
-                #     masks_dir=masks_dir,
-                #     stage="predict",
-                # )
-
                 self.predict_wrapped.append(
                     (f"{name}_val", WrapWithSource(base_val_p, source_id=source_id))
                 )
-                # self.predict_wrapped.append(
-                #     (f"{name}_test", WrapWithSource(base_test_p, source_id=source_id))
-                # )
 
         if stage in ("fit", "validate", None):
             self.train_dataset = ConcatDataset(train_wrapped)
 
         return self
 
-    # -------------------------
-    # Loaders
-    # -------------------------
     def train_dataloader(self):
-        dataset = self.train_dataset
-        if self.epoch_repeat > 1:
-            dataset = RepeatDataset(dataset, repeats=self.epoch_repeat)
-
         return DataLoader(
-            dataset,
-            shuffle=True,
+            self.train_dataset,
+            shuffle=False,
+            sampler=self._build_train_sampler(),
             drop_last=True,
             collate_fn=self.train_collate,
             **self.dataloader_kwargs,
         )
 
     def val_dataloader(self):
-        # one loader per dataset to keep metrics separate if you want
         return [
             DataLoader(ds, collate_fn=self.eval_collate, **self.val_dataloader_kwargs)
             for _, ds in self.val_wrapped
