@@ -156,11 +156,20 @@ class TwoHeadSemantic(LightningModule):
         loss_a = self._loss_on_subset(logits_a, targets, m_a, self.criterion_a)
         loss_b = self._loss_on_subset(logits_b, targets, m_b, self.criterion_b)
 
-        loss_total = self.loss_weight_a * loss_a + self.loss_weight_b * loss_b
-
         if out.get("logits_b_base") is not None:
-            loss_total = loss_total + out["logits_b_base"] * self.loss_weight_b * 0.3
+            logits_b_base = out["logits_b_base"]
+            if logits_b.shape[-2:] != self.img_size:
+                logits_b_base = F.interpolate(
+                    logits_b_base,
+                    self.img_size,
+                    mode="bilinear",
+                )
+            loss_b += (
+                self._loss_on_subset(logits_b_base, targets, m_b, self.criterion_b)
+                * 0.3
+            )
 
+        loss_total = self.loss_weight_a * loss_a + self.loss_weight_b * loss_b
         # logging
         self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
         self.log("train_loss_a", loss_a, sync_dist=True, prog_bar=False)

@@ -132,7 +132,7 @@
                 "configs/anorak_ignite_multitask.yaml",
                 "--no_compile",
                 "--trainer.logger=false",
-                "--data.init_args.fold=1",
+                "--data.init_args.fold=0",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
