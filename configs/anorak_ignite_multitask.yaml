@@ -13,7 +13,6 @@ trainer:
       tags:
         [
           "baseline",
-          "shark",
           "20x",
           "896x896",
           "ANORAK+IGNITE",
