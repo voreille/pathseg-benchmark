@@ -77,6 +77,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
         val_transforms: Optional[nn.Module] = None,
         return_background_mask: bool = True,
         num_iterations_per_epoch: int = 1500,
+        fold: Optional[int] = 0,
     ) -> None:
         super().__init__(
             root="",
@@ -94,6 +95,8 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
         self.datasets_cfg = datasets
         self.return_background_mask = bool(return_background_mask)
+
+        self.fold = int(fold) if fold is not None else None
 
         self.num_iterations_per_epoch = int(num_iterations_per_epoch)
         if self.num_iterations_per_epoch <= 0:
@@ -241,7 +244,10 @@ class MultiTaskConcatDataModule(LightningDataModule):
             masks_dir = root / dcfg.get("masks_subdir", "masks")
             split_csv = root / dcfg.get("split_csv", "split.csv")
             source_id = int(dcfg.get("source_id", 0))
-            fold = int(dcfg.get("fold", 0))
+            if self.fold is not None:
+                fold = self.fold
+            else:
+                fold = int(dcfg.get("fold", 0))
 
             df = self._read_split_csv(split_csv)
             train_ids, val_ids, test_ids = self._get_split_ids(df, fold=fold)
