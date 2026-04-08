@@ -158,6 +158,9 @@ class TwoHeadSemantic(LightningModule):
 
         loss_total = self.loss_weight_a * loss_a + self.loss_weight_b * loss_b
 
+        if out.get("logits_b_base") is not None:
+            loss_total = loss_total + out["logits_b_base"] * self.loss_weight_b * 0.3
+
         # logging
         self.log("train_loss_total", loss_total, sync_dist=True, prog_bar=True)
         self.log("train_loss_a", loss_a, sync_dist=True, prog_bar=False)
