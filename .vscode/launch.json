@@ -370,5 +370,34 @@
             },
             "justMyCode": false
         },
+        {
+            "name": "Python: Conformal Pred WSI DMHC",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/pathseg/wsi_eval/compute_slide_pred_conformal.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--tiles-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/tiles",
+                "--slides-dir",
+                "/mnt/nas7/data/Personal/Valentin/DartmouthLungCancerHistologyDataset/DHMC_LUAD_corr",
+                "--output-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions",
+                "--model-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126",
+                "--batch-size",
+                "16",
+                "--gpu-id",
+                "1",
+                "--save-argmax-png",
+                "--num-workers",
+                "16",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+ 
     ]
 }

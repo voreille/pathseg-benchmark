@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import importlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -82,6 +82,11 @@ class HeadCalibrationSpec:
     logits_key: str
     num_classes: int
     ignore_index: int
+    exclude_classes: list[int] = field(default_factory=list)
+    filter_background: bool = False
+
+    def excluded_set(self) -> set[int]:
+        return set(self.exclude_classes)
 
 
 # -----------------------------------------------------------------------------
@@ -99,8 +104,7 @@ def export_model_bundle(
     if not hasattr(pl_model, "network"):
         raise AttributeError("Loaded Lightning model has no attribute 'network'.")
 
-    network = pl_model.network.cpu().eval()
-
+    network = pl_model.network.eval()
     cfg_section = _get_cfg_section(cfg)
 
     try:
@@ -121,7 +125,12 @@ def export_model_bundle(
     weights_path = output_dir / weights_name
     yaml_path = output_dir / yaml_name
 
-    torch.save(network.state_dict(), weights_path)
+    # save CPU weights for portability
+    state_dict_cpu = {
+        k: v.detach().cpu() if torch.is_tensor(v) else v
+        for k, v in network.state_dict().items()
+    }
+    torch.save(state_dict_cpu, weights_path)
 
     export_cfg = {
         "model": {
@@ -178,28 +187,30 @@ def infer_logits_list_for_head(
     logits_key: str,
 ) -> list[torch.Tensor]:
     """
-    Mirrors TwoHeadSemantic.eval_step logic as closely as possible:
+    Mirrors TwoHeadSemantic.eval_step logic:
       - window_imgs_semantic
       - network forward on crops
       - interpolate crop logits to img_size
       - revert_window_logits_semantic
     Returns:
-      list of logits tensors [(C,H,W), ...] for each image in the batch
+      list of logits tensors [(C,H,W), ...]
     """
+    device = next(pl_model.parameters()).device
+
     crops, origins, img_sizes = pl_model.window_imgs_semantic(imgs)
-    crops = crops.to(next(pl_model.parameters()).device)
+    crops = crops.to(device, non_blocking=True)
     crop_out = pl_model(crops)
 
-    if isinstance(crop_out, dict):
-        if logits_key not in crop_out:
-            raise KeyError(
-                f"Requested logits_key='{logits_key}' not found in model output keys: "
-                f"{list(crop_out.keys())}"
-            )
-        crop_logits = crop_out[logits_key]
-    else:
+    if not isinstance(crop_out, dict):
         raise TypeError("Expected model forward output to be a dict for calibration.")
 
+    if logits_key not in crop_out:
+        raise KeyError(
+            f"Requested logits_key='{logits_key}' not found in model output keys: "
+            f"{list(crop_out.keys())}"
+        )
+
+    crop_logits = crop_out[logits_key]
     crop_logits = F.interpolate(
         crop_logits,
         pl_model.img_size,
@@ -214,7 +225,8 @@ def infer_logits_list_for_head(
 
 
 def validate_logits_num_classes(
-    logits: torch.Tensor, spec: HeadCalibrationSpec
+    logits: torch.Tensor,
+    spec: HeadCalibrationSpec,
 ) -> None:
     if logits.ndim != 3:
         raise ValueError(
@@ -228,15 +240,14 @@ def validate_logits_num_classes(
         )
 
 
-
 @torch.no_grad()
 def fit_class_conditional_conformal_for_head(
     pl_model,
     dataloader: Iterable[Any],
     spec: HeadCalibrationSpec,
     alpha: float,
-    device: str,
 ) -> dict[str, Any]:
+    excluded = spec.excluded_set()
     scores_by_class: list[list[torch.Tensor]] = [[] for _ in range(spec.num_classes)]
 
     for batch_idx, batch in enumerate(dataloader):
@@ -255,9 +266,14 @@ def fit_class_conditional_conformal_for_head(
             validate_logits_num_classes(logits, spec)
 
             probs = F.softmax(logits.unsqueeze(0), dim=1).squeeze(0)  # [C,H,W]
+            pred = torch.argmax(probs, dim=0)  # [H, W]
             tgt = tgt.to(probs.device).long()
 
             valid = (tgt != spec.ignore_index) & (tgt >= 0) & (tgt < spec.num_classes)
+            if excluded:
+                for c in excluded:
+                    valid &= tgt != c
+
             if not valid.any():
                 continue
 
@@ -266,14 +282,24 @@ def fit_class_conditional_conformal_for_head(
             scores = 1.0 - p_true
 
             for c in range(spec.num_classes):
+                if c in excluded:
+                    continue
                 mask_c = valid & (tgt == c)
+                if spec.filter_background:
+                    mask_c &= pred != 0
+
                 if mask_c.any():
                     scores_by_class[c].append(scores[mask_c].detach().cpu())
 
-    thresholds = []
-    counts = []
+    thresholds: list[float | None] = []
+    counts: list[int] = []
 
     for c in range(spec.num_classes):
+        if c in excluded:
+            thresholds.append(None)
+            counts.append(0)
+            continue
+
         if len(scores_by_class[c]) == 0:
             click.echo(
                 f"[WARN] head='{spec.name}' class={c}: no calibration samples found; "
@@ -294,6 +320,7 @@ def fit_class_conditional_conformal_for_head(
         "logits_key": spec.logits_key,
         "num_classes": int(spec.num_classes),
         "ignore_index": int(spec.ignore_index),
+        "exclude_classes": sorted(excluded),
         "thresholds": thresholds,
         "counts_per_class": counts,
     }
@@ -310,6 +337,14 @@ def _build_head_specs(calibration_cfg: dict[str, Any]) -> list[HeadCalibrationSp
         if not isinstance(head_cfg, dict):
             raise TypeError(f"head '{head_name}' config must be a dict")
 
+        exclude_classes = head_cfg.get("exclude_classes", [])
+        if exclude_classes is None:
+            exclude_classes = []
+        if not isinstance(exclude_classes, list):
+            raise TypeError(
+                f"head '{head_name}' exclude_classes must be a list of ints"
+            )
+
         specs.append(
             HeadCalibrationSpec(
                 name=str(head_name),
@@ -318,6 +353,8 @@ def _build_head_specs(calibration_cfg: dict[str, Any]) -> list[HeadCalibrationSp
                 logits_key=str(head_cfg["logits_key"]),
                 num_classes=int(head_cfg["num_classes"]),
                 ignore_index=int(head_cfg.get("ignore_index", 255)),
+                exclude_classes=[int(x) for x in exclude_classes],
+                filter_background=bool(head_cfg.get("filter_background", False)),
             )
         )
     return specs
@@ -418,7 +455,8 @@ def main(
     for spec in enabled_specs:
         click.echo(
             f"[INFO] calibrating head='{spec.name}' "
-            f"(dataloader_idx={spec.dataloader_idx}, logits_key={spec.logits_key})..."
+            f"(dataloader_idx={spec.dataloader_idx}, logits_key={spec.logits_key}, "
+            f"exclude_classes={sorted(spec.excluded_set())})..."
         )
         dl = _get_selected_dataloader(loaders, spec.dataloader_idx)
 
@@ -427,13 +465,13 @@ def main(
             dataloader=dl,
             spec=spec,
             alpha=alpha,
-            device=device,
         )
         conformal_artifact["heads"][spec.name] = result
         click.echo(
             f"[OK] fitted conformal for head='{spec.name}' "
             f"with thresholds={result['thresholds']}"
         )
+
     click.echo("[INFO] exporting model bundle...")
     weights_path, model_yaml_path = export_model_bundle(
         cfg=cfg,
@@ -454,14 +492,6 @@ def main(
         model_yaml["conformal"] = conformal_artifact
         _save_yaml(model_yaml_path, model_yaml)
         click.echo(f"[OK] wrote conformal section into -> {model_yaml_path}")
-
-    if save_as_separate_file:
-        click.echo(
-            f"conformal = yaml.safe_load(open(r'{output_dir / conformal_filename}', 'r'))"
-        )
-    else:
-        click.echo("conformal = cfg['conformal']")
-    click.echo("```")
 
 
 if __name__ == "__main__":
