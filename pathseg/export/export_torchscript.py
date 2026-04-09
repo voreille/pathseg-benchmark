@@ -51,10 +51,12 @@ def export_torchscript(
 )
 def main(ckpt_path, config_path, out_path, device):
     """Simple CLI program to greet someone"""
+    otut_path = Path(out_path).resolve()
+    otut_path.parent.mkdir(parents=False, exist_ok=True)
     export_torchscript(
         config_path=config_path,
         ckpt_path=ckpt_path,
-        out_path=out_path,
+        out_path=str(out_path),
         device=device,
     )
 
