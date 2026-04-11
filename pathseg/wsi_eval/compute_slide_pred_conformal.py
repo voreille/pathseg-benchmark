@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import csv
 import importlib
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 import click
 import numpy as np
@@ -47,6 +49,10 @@ HEAD_B_LABEL_MAP = {
     "acinar": 5,
     "lepidic": 6,
 }
+
+SAFE_AMBIGUOUS_ID = 255
+FG_UNION_PATTERN_ID = -2
+FG_UNION_PATTERN_NAME = "__fg_union__"
 
 
 def import_from_string(path: str):
@@ -239,9 +245,7 @@ def get_head_b_thresholds(
     if thresholds is None:
         return None
 
-    vals = []
-    for t in thresholds:
-        vals.append(float("nan") if t is None else float(t))
+    vals = [float("nan") if t is None else float(t) for t in thresholds]
 
     if len(vals) == num_classes:
         out = torch.tensor(vals, dtype=torch.float32)
@@ -274,7 +278,7 @@ def compute_head_a_prediction(
       - uncovered pixels => forced background
       - covered pixels => standard softmax over all classes
     """
-    probs_a = torch.softmax(avg_logits_a, dim=0)  # [C,H,W]
+    probs_a = torch.softmax(avg_logits_a, dim=0)
     probs_a = probs_a.clone()
 
     uncovered = ~covered_mask_a
@@ -304,7 +308,6 @@ def compute_conformal_head_b(
     covered_mask_b: [H,W] bool
     support_mask: optional extra mask, e.g. from head A
     """
-
     if avg_logits_b.ndim != 3:
         raise ValueError(
             f"avg_logits_b must be [C,H,W], got {tuple(avg_logits_b.shape)}"
@@ -312,18 +315,15 @@ def compute_conformal_head_b(
 
     c, h, w = avg_logits_b.shape
 
-    probs_b = torch.softmax(avg_logits_b, dim=0)  # full softmax over all classes
+    probs_b = torch.softmax(avg_logits_b, dim=0)
     pred_b_argmax = torch.argmax(probs_b, dim=0).to(torch.uint8)
 
     valid_mask = covered_mask_b.clone()
     if support_mask is not None:
         valid_mask = valid_mask & support_mask
 
-    # where we actually apply conformal:
-    # only where model predicts non-bg
     apply_conformal_mask = valid_mask & (pred_b_argmax != bg_idx)
 
-    # default safe prediction = argmax
     pred_b_safe = pred_b_argmax.clone()
     pred_b_safe[~covered_mask_b] = bg_idx
 
@@ -342,7 +342,6 @@ def compute_conformal_head_b(
 
     tau = 1.0 - thresholds_b
     valid_cls = ~torch.isnan(tau)
-
     fg_ids = [i for i in range(c) if i != bg_idx]
 
     for cls_id in fg_ids:
@@ -351,8 +350,7 @@ def compute_conformal_head_b(
 
     set_size_b = possible_b.sum(dim=0).to(torch.uint8)
 
-    # only pixels under conformal control can become ambiguous
-    pred_b_safe[apply_conformal_mask] = 255
+    pred_b_safe[apply_conformal_mask] = SAFE_AMBIGUOUS_ID
 
     singleton = apply_conformal_mask & (set_size_b == 1)
     if singleton.any():
@@ -360,8 +358,6 @@ def compute_conformal_head_b(
             possible_b[:, singleton].float(), dim=0
         ).to(torch.uint8)
 
-    # optional choice:
-    # if no FG class passes threshold, fall back to background
     empty = apply_conformal_mask & (set_size_b == 0)
     pred_b_safe[empty] = bg_idx
 
@@ -376,29 +372,388 @@ def compute_conformal_head_b(
 
 
 def compute_area_stats_from_safe_possible(
+    pred_b_argmax: torch.Tensor,
     pred_b_safe: torch.Tensor,
     possible_b: torch.Tensor,
+    covered_mask_b: torch.Tensor,
 ) -> dict[str, Any]:
     """
-    pred_b_safe: [H,W] with 255 for ambiguous FG pixels
-    possible_b: [C,H,W] bool
+    Backward-compatible YAML summary for quick inspection.
     """
     stats: dict[str, Any] = {}
     num_classes = int(possible_b.shape[0])
 
     for cls_id in range(num_classes):
-        safe_area = int((pred_b_safe == cls_id).sum().item())
-        possible_area = int(possible_b[cls_id].sum().item())
         stats[str(cls_id)] = {
-            "safe_area_px": safe_area,
-            "possible_area_px": possible_area,
+            "argmax_area_px": int(
+                ((pred_b_argmax == cls_id) & covered_mask_b).sum().item()
+            ),
+            "safe_area_px": int(
+                ((pred_b_safe == cls_id) & covered_mask_b).sum().item()
+            ),
+            "possible_area_px": int(possible_b[cls_id].sum().item()),
         }
 
     stats["ambiguous"] = {
-        "safe_area_px": int((pred_b_safe == 255).sum().item()),
+        "safe_area_px": int(
+            ((pred_b_safe == SAFE_AMBIGUOUS_ID) & covered_mask_b).sum().item()
+        ),
     }
-
     return stats
+
+
+@dataclass(frozen=True)
+class StatRow:
+    wsi_id: str
+    stat_type: str
+    prediction_type: str
+    compartment_id: int
+    compartment_name: str
+    pattern_id: int
+    pattern_name: str
+    area_px: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def make_id_to_name(
+    label_map: dict[str, int], ignore_ids: set[int] | None = None
+) -> dict[int, str]:
+    ignore_ids = ignore_ids or set()
+    out: dict[int, str] = {}
+    for name, idx in label_map.items():
+        if idx in ignore_ids:
+            continue
+        out[int(idx)] = str(name)
+    return out
+
+
+def masked_bincount(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    minlength: int,
+) -> torch.Tensor:
+    values = values.long()
+    mask = mask.bool()
+    if values.shape != mask.shape:
+        raise ValueError(
+            f"Shape mismatch: values={tuple(values.shape)} mask={tuple(mask.shape)}"
+        )
+    if not mask.any():
+        return torch.zeros((minlength,), dtype=torch.long)
+    return torch.bincount(values[mask].reshape(-1), minlength=minlength)
+
+
+def masked_joint_bincount(
+    values_a: torch.Tensor,
+    values_b: torch.Tensor,
+    mask: torch.Tensor,
+    num_a: int,
+    num_b: int,
+) -> torch.Tensor:
+    values_a = values_a.long()
+    values_b = values_b.long()
+    mask = mask.bool()
+
+    if not (values_a.shape == values_b.shape == mask.shape):
+        raise ValueError(
+            f"Shape mismatch: a={tuple(values_a.shape)} b={tuple(values_b.shape)} mask={tuple(mask.shape)}"
+        )
+
+    if not mask.any():
+        return torch.zeros((num_a, num_b), dtype=torch.long)
+
+    a = values_a[mask].reshape(-1)
+    b = values_b[mask].reshape(-1)
+    encoded = a * num_b + b
+    counts = torch.bincount(encoded, minlength=num_a * num_b)
+    return counts.reshape(num_a, num_b)
+
+
+def build_head_a_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    roi_mask: torch.Tensor,
+    a_id_to_name: dict[int, str],
+) -> list[StatRow]:
+    num_a = max(a_id_to_name.keys()) + 1
+    counts = masked_bincount(pred_a, roi_mask, minlength=num_a)
+
+    rows: list[StatRow] = []
+    for comp_id, comp_name in sorted(a_id_to_name.items()):
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="head_a",
+                prediction_type="argmax",
+                compartment_id=comp_id,
+                compartment_name=comp_name,
+                pattern_id=-1,
+                pattern_name="",
+                area_px=int(counts[comp_id].item()),
+            )
+        )
+    return rows
+
+
+def build_head_b_rows(
+    wsi_id: str,
+    pred_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    b_id_to_name: dict[int, str],
+    prediction_type: str,
+    include_ambiguous: bool = False,
+) -> list[StatRow]:
+    max_id = SAFE_AMBIGUOUS_ID if include_ambiguous else max(b_id_to_name.keys())
+    counts = masked_bincount(pred_b, roi_mask, minlength=max_id + 1)
+
+    rows: list[StatRow] = []
+    for pat_id, pat_name in sorted(b_id_to_name.items()):
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="head_b",
+                prediction_type=prediction_type,
+                compartment_id=-1,
+                compartment_name="",
+                pattern_id=pat_id,
+                pattern_name=pat_name,
+                area_px=int(counts[pat_id].item()),
+            )
+        )
+
+    if include_ambiguous:
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="head_b",
+                prediction_type=prediction_type,
+                compartment_id=-1,
+                compartment_name="",
+                pattern_id=SAFE_AMBIGUOUS_ID,
+                pattern_name="ambiguous",
+                area_px=int(counts[SAFE_AMBIGUOUS_ID].item()),
+            )
+        )
+    return rows
+
+
+def build_a_by_b_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    pred_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    a_id_to_name: dict[int, str],
+    b_id_to_name: dict[int, str],
+    prediction_type: str,
+    include_ambiguous: bool = False,
+) -> list[StatRow]:
+    num_a = max(a_id_to_name.keys()) + 1
+    num_b = SAFE_AMBIGUOUS_ID + 1 if include_ambiguous else max(b_id_to_name.keys()) + 1
+
+    counts = masked_joint_bincount(
+        values_a=pred_a,
+        values_b=pred_b,
+        mask=roi_mask,
+        num_a=num_a,
+        num_b=num_b,
+    )
+
+    rows: list[StatRow] = []
+    for comp_id, comp_name in sorted(a_id_to_name.items()):
+        for pat_id, pat_name in sorted(b_id_to_name.items()):
+            rows.append(
+                StatRow(
+                    wsi_id=wsi_id,
+                    stat_type="a_by_b",
+                    prediction_type=prediction_type,
+                    compartment_id=comp_id,
+                    compartment_name=comp_name,
+                    pattern_id=pat_id,
+                    pattern_name=pat_name,
+                    area_px=int(counts[comp_id, pat_id].item()),
+                )
+            )
+
+        if include_ambiguous:
+            rows.append(
+                StatRow(
+                    wsi_id=wsi_id,
+                    stat_type="a_by_b",
+                    prediction_type=prediction_type,
+                    compartment_id=comp_id,
+                    compartment_name=comp_name,
+                    pattern_id=SAFE_AMBIGUOUS_ID,
+                    pattern_name="ambiguous",
+                    area_px=int(counts[comp_id, SAFE_AMBIGUOUS_ID].item()),
+                )
+            )
+    return rows
+
+
+def build_a_by_b_binary_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    pred_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    a_id_to_name: dict[int, str],
+    bg_idx: int,
+    prediction_type: str,
+    ambiguous_id: int | None = None,
+) -> list[StatRow]:
+    rows: list[StatRow] = []
+    num_a = max(a_id_to_name.keys()) + 1
+
+    bg_mask = roi_mask & (pred_b == bg_idx)
+    fg_mask = roi_mask & (pred_b != bg_idx)
+
+    bg_counts = masked_bincount(pred_a, bg_mask, minlength=num_a)
+    fg_counts = masked_bincount(pred_a, fg_mask, minlength=num_a)
+
+    amb_counts = None
+    if ambiguous_id is not None:
+        amb_mask = roi_mask & (pred_b == ambiguous_id)
+        fg_mask = roi_mask & (pred_b != bg_idx) & (pred_b != ambiguous_id)
+        fg_counts = masked_bincount(pred_a, fg_mask, minlength=num_a)
+        amb_counts = masked_bincount(pred_a, amb_mask, minlength=num_a)
+
+    for comp_id, comp_name in sorted(a_id_to_name.items()):
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="a_by_b_binary",
+                prediction_type=prediction_type,
+                compartment_id=comp_id,
+                compartment_name=comp_name,
+                pattern_id=bg_idx,
+                pattern_name="background",
+                area_px=int(bg_counts[comp_id].item()),
+            )
+        )
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="a_by_b_binary",
+                prediction_type=prediction_type,
+                compartment_id=comp_id,
+                compartment_name=comp_name,
+                pattern_id=FG_UNION_PATTERN_ID,
+                pattern_name=FG_UNION_PATTERN_NAME,
+                area_px=int(fg_counts[comp_id].item()),
+            )
+        )
+
+        if amb_counts is not None:
+            rows.append(
+                StatRow(
+                    wsi_id=wsi_id,
+                    stat_type="a_by_b_binary",
+                    prediction_type=prediction_type,
+                    compartment_id=comp_id,
+                    compartment_name=comp_name,
+                    pattern_id=SAFE_AMBIGUOUS_ID,
+                    pattern_name="ambiguous",
+                    area_px=int(amb_counts[comp_id].item()),
+                )
+            )
+
+    return rows
+
+
+def build_slide_stats_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    pred_b_argmax: torch.Tensor,
+    pred_b_safe: torch.Tensor,
+    covered_mask_a: torch.Tensor,
+    covered_mask_b: torch.Tensor,
+    head_a_label_map: dict[str, int],
+    head_b_label_map: dict[str, int],
+) -> list[StatRow]:
+    a_id_to_name = make_id_to_name(head_a_label_map, ignore_ids={255})
+    b_id_to_name = make_id_to_name(head_b_label_map)
+
+    # Restrict stats to modeled regions, not full-slide padded background.
+    roi_a = covered_mask_a.bool()
+    roi_b = covered_mask_b.bool()
+    roi_ab = (covered_mask_a & covered_mask_b).bool()
+
+    rows: list[StatRow] = []
+    rows.extend(build_head_a_rows(wsi_id, pred_a, roi_a, a_id_to_name))
+    rows.extend(
+        build_head_b_rows(
+            wsi_id, pred_b_argmax, roi_b, b_id_to_name, prediction_type="argmax"
+        )
+    )
+    rows.extend(
+        build_head_b_rows(
+            wsi_id,
+            pred_b_safe,
+            roi_b,
+            b_id_to_name,
+            prediction_type="safe",
+            include_ambiguous=True,
+        )
+    )
+    rows.extend(
+        build_a_by_b_rows(
+            wsi_id,
+            pred_a,
+            pred_b_argmax,
+            roi_ab,
+            a_id_to_name,
+            b_id_to_name,
+            prediction_type="argmax",
+            include_ambiguous=False,
+        )
+    )
+    rows.extend(
+        build_a_by_b_rows(
+            wsi_id,
+            pred_a,
+            pred_b_safe,
+            roi_ab,
+            a_id_to_name,
+            b_id_to_name,
+            prediction_type="safe",
+            include_ambiguous=True,
+        )
+    )
+    rows.extend(
+        build_a_by_b_binary_rows(
+            wsi_id=wsi_id,
+            pred_a=pred_a,
+            pred_b=pred_b_argmax,
+            roi_mask=roi_ab,
+            a_id_to_name=a_id_to_name,
+            bg_idx=0,
+            prediction_type="argmax",
+            ambiguous_id=None,
+        )
+    )
+    rows.extend(
+        build_a_by_b_binary_rows(
+            wsi_id=wsi_id,
+            pred_a=pred_a,
+            pred_b=pred_b_safe,
+            roi_mask=roi_ab,
+            a_id_to_name=a_id_to_name,
+            bg_idx=0,
+            prediction_type="safe",
+            ambiguous_id=SAFE_AMBIGUOUS_ID,
+        )
+    )
+    return rows
+
+
+def write_stat_rows_csv(path: Path, rows: Iterable[StatRow]) -> None:
+    fieldnames = list(StatRow.__dataclass_fields__.keys())
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row.to_dict())
 
 
 @click.command()
@@ -623,7 +978,7 @@ def main(
             )
             pred_a = head_a["pred_a"]
 
-            # hard FG support from head A, but only where head B is covered
+            # kept for backward compatibility in payload
             valid_fg_mask_b = covered_mask_b & (pred_a != 0)
 
             conformal_b = compute_conformal_head_b(
@@ -637,11 +992,23 @@ def main(
             pred_b_safe = conformal_b["pred_b_safe"].cpu()
             possible_b = conformal_b["possible_b"].cpu()
             set_size_b = conformal_b["set_size_b"].cpu()
-            probs_b = conformal_b["probs_b"].cpu()
 
             area_stats_b = compute_area_stats_from_safe_possible(
+                pred_b_argmax=pred_b_argmax,
                 pred_b_safe=pred_b_safe,
                 possible_b=possible_b,
+                covered_mask_b=covered_mask_b,
+            )
+
+            slide_stat_rows = build_slide_stats_rows(
+                wsi_id=wsi_id,
+                pred_a=pred_a,
+                pred_b_argmax=pred_b_argmax,
+                pred_b_safe=pred_b_safe,
+                covered_mask_a=covered_mask_a,
+                covered_mask_b=covered_mask_b,
+                head_a_label_map=HEAD_A_LABEL_MAP,
+                head_b_label_map=HEAD_B_LABEL_MAP,
             )
 
             payload = {
@@ -691,6 +1058,9 @@ def main(
             stats_path = output_dir / f"{wsi_id}_area_stats_b.yaml"
             with stats_path.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(area_stats_b, f, sort_keys=False)
+
+            slide_stats_csv_path = output_dir / f"{wsi_id}_slide_stats.csv"
+            write_stat_rows_csv(slide_stats_csv_path, slide_stat_rows)
 
         finally:
             wsi.close()
