@@ -138,7 +138,7 @@
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}",
-                "CUDA_VISIBLE_DEVICES": "0",
+                "CUDA_VISIBLE_DEVICES": "1",
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false
@@ -353,11 +353,11 @@
             "program": "${workspaceFolder}/pathseg/export/export_and_calibrate.py",
             "args": [
                 "--config-path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/bag9957e/loading_config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/ber4l7zg/loading_config.yaml",
                 "--ckpt-path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/bag9957e/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/ber4l7zg/epoch=26-step=40000.ckpt",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126/",
+                "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137/",
                 "--calibration-config-path",
                 "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126/calibration_config.yaml",
             ],
@@ -385,7 +385,7 @@
                 "--output-dir",
                 "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions",
                 "--model-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126",
+                "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137",
                 "--batch-size",
                 "16",
                 "--gpu-id",

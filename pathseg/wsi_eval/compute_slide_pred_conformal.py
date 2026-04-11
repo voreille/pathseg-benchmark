@@ -97,10 +97,14 @@ def get_mpp(wsi: openslide.OpenSlide) -> float:
     mpp_y = wsi.properties.get(openslide.PROPERTY_NAME_MPP_Y)
 
     if mpp_x is None or mpp_y is None:
-        raise ValueError("WSI is missing MPP properties (openslide.mpp-x / openslide.mpp-y).")
+        raise ValueError(
+            "WSI is missing MPP properties (openslide.mpp-x / openslide.mpp-y)."
+        )
 
     if abs(float(mpp_x) - float(mpp_y)) > 1e-8:
-        raise ValueError(f"Non-square pixels not supported (mpp_x={mpp_x}, mpp_y={mpp_y}).")
+        raise ValueError(
+            f"Non-square pixels not supported (mpp_x={mpp_x}, mpp_y={mpp_y})."
+        )
 
     return float(mpp_x)
 
@@ -290,84 +294,76 @@ def compute_head_a_prediction(
 def compute_conformal_head_b(
     avg_logits_b: torch.Tensor,
     thresholds_b: torch.Tensor | None,
-    valid_fg_mask: torch.Tensor,
+    covered_mask_b: torch.Tensor,
+    support_mask: torch.Tensor | None = None,
     bg_idx: int = 0,
 ) -> dict[str, torch.Tensor]:
     """
-    Head B logic:
-      - outside valid_fg_mask => forced background
-      - inside valid_fg_mask => prediction only among FG classes
-      - conformal thresholds are applied only to FG classes
-
     avg_logits_b: [C,H,W]
-    thresholds_b: [C] with NaN for excluded classes (bg should be NaN), or None
-    valid_fg_mask: [H,W] bool
+    thresholds_b: [C] with NaN for excluded classes, typically bg=NaN
+    covered_mask_b: [H,W] bool
+    support_mask: optional extra mask, e.g. from head A
     """
+
     if avg_logits_b.ndim != 3:
-        raise ValueError(f"avg_logits_b must be [C,H,W], got {tuple(avg_logits_b.shape)}")
-    if valid_fg_mask.ndim != 2:
-        raise ValueError(f"valid_fg_mask must be [H,W], got {tuple(valid_fg_mask.shape)}")
-    if avg_logits_b.shape[1:] != valid_fg_mask.shape:
         raise ValueError(
-            f"Spatial mismatch: logits {tuple(avg_logits_b.shape[1:])} vs mask {tuple(valid_fg_mask.shape)}"
+            f"avg_logits_b must be [C,H,W], got {tuple(avg_logits_b.shape)}"
         )
 
     c, h, w = avg_logits_b.shape
-    fg_ids = [i for i in range(c) if i != bg_idx]
-    if len(fg_ids) == 0:
-        raise ValueError("Head B has no foreground classes.")
 
-    # conditional distribution over FG classes only
-    probs_fg_only = torch.softmax(avg_logits_b[fg_ids], dim=0)  # [C_fg,H,W]
-
-    # Build full probs tensor:
-    # outside valid_fg_mask: bg=1, fg=0
-    # inside valid_fg_mask:  bg=0, fg=conditional fg probs
-    probs_b = torch.zeros_like(avg_logits_b)  # [C,H,W]
-    valid_fg_mask_f = valid_fg_mask.unsqueeze(0).to(dtype=probs_fg_only.dtype)  # [1,H,W]
-
-    probs_b[bg_idx] = (~valid_fg_mask).to(dtype=avg_logits_b.dtype)
-    probs_b[fg_ids] = probs_fg_only * valid_fg_mask_f
-
+    probs_b = torch.softmax(avg_logits_b, dim=0)  # full softmax over all classes
     pred_b_argmax = torch.argmax(probs_b, dim=0).to(torch.uint8)
 
+    valid_mask = covered_mask_b.clone()
+    if support_mask is not None:
+        valid_mask = valid_mask & support_mask
+
+    # where we actually apply conformal:
+    # only where model predicts non-bg
+    apply_conformal_mask = valid_mask & (pred_b_argmax != bg_idx)
+
+    # default safe prediction = argmax
+    pred_b_safe = pred_b_argmax.clone()
+    pred_b_safe[~covered_mask_b] = bg_idx
+
+    possible_b = torch.zeros_like(probs_b, dtype=torch.bool)
+    set_size_b = torch.zeros((h, w), dtype=torch.uint8, device=avg_logits_b.device)
+
     if thresholds_b is None:
-        pred_b_safe = pred_b_argmax.clone()
-        possible_b = torch.zeros_like(probs_b, dtype=torch.bool)
-        set_size_b = torch.ones((h, w), dtype=torch.uint8, device=avg_logits_b.device)
-        set_size_b[valid_fg_mask] = 1
         return {
             "probs_b": probs_b,
             "pred_b_argmax": pred_b_argmax,
             "pred_b_safe": pred_b_safe,
             "possible_b": possible_b,
             "set_size_b": set_size_b,
-            "valid_fg_mask": valid_fg_mask,
+            "apply_conformal_mask": apply_conformal_mask,
         }
 
-    if thresholds_b.shape[0] != c:
-        raise ValueError(
-            f"thresholds_b must have shape [C], got {tuple(thresholds_b.shape)} for C={c}"
-        )
-
-    tau = 1.0 - thresholds_b  # [C]
+    tau = 1.0 - thresholds_b
     valid_cls = ~torch.isnan(tau)
 
-    possible_b = torch.zeros_like(probs_b, dtype=torch.bool)
+    fg_ids = [i for i in range(c) if i != bg_idx]
 
     for cls_id in fg_ids:
         if bool(valid_cls[cls_id]):
-            possible_b[cls_id] = valid_fg_mask & (probs_b[cls_id] >= tau[cls_id])
+            possible_b[cls_id] = apply_conformal_mask & (probs_b[cls_id] >= tau[cls_id])
 
-    possible_b[bg_idx] = False
     set_size_b = possible_b.sum(dim=0).to(torch.uint8)
 
-    pred_b_safe = torch.full((h, w), fill_value=255, dtype=torch.uint8, device=avg_logits_b.device)
-    pred_b_safe[~valid_fg_mask] = bg_idx
+    # only pixels under conformal control can become ambiguous
+    pred_b_safe[apply_conformal_mask] = 255
 
-    singleton = valid_fg_mask & (set_size_b == 1)
+    singleton = apply_conformal_mask & (set_size_b == 1)
     if singleton.any():
-        pred_b_safe[singleton] = torch.argmax(possible_b[:, singleton].float(), dim=0).to(torch.uint8)
+        pred_b_safe[singleton] = torch.argmax(
+            possible_b[:, singleton].float(), dim=0
+        ).to(torch.uint8)
+
+    # optional choice:
+    # if no FG class passes threshold, fall back to background
+    empty = apply_conformal_mask & (set_size_b == 0)
+    pred_b_safe[empty] = bg_idx
 
     return {
         "probs_b": probs_b,
@@ -375,8 +371,9 @@ def compute_conformal_head_b(
         "pred_b_safe": pred_b_safe,
         "possible_b": possible_b,
         "set_size_b": set_size_b,
-        "valid_fg_mask": valid_fg_mask,
+        "apply_conformal_mask": apply_conformal_mask,
     }
+
 
 def compute_area_stats_from_safe_possible(
     pred_b_safe: torch.Tensor,
@@ -545,7 +542,9 @@ def main(
                 required_keys = {"logits_a", "logits_b"}
                 missing = required_keys - set(out.keys())
                 if missing:
-                    raise KeyError(f"Model output missing required keys: {sorted(missing)}")
+                    raise KeyError(
+                        f"Model output missing required keys: {sorted(missing)}"
+                    )
 
                 logits_a_cpu = out["logits_a"].detach().float().cpu()
                 logits_b_cpu = out["logits_b"].detach().float().cpu()
@@ -576,14 +575,14 @@ def main(
                     out_h = y1m - y0m
 
                     tile_logits_a = F.interpolate(
-                        logits_a_cpu[b:b + 1],
+                        logits_a_cpu[b : b + 1],
                         size=(out_h, out_w),
                         mode="bilinear",
                         align_corners=False,
                     )[0]
 
                     tile_logits_b = F.interpolate(
-                        logits_b_cpu[b:b + 1],
+                        logits_b_cpu[b : b + 1],
                         size=(out_h, out_w),
                         mode="bilinear",
                         align_corners=False,
@@ -630,7 +629,7 @@ def main(
             conformal_b = compute_conformal_head_b(
                 avg_logits_b=avg_logits_b.to(device),
                 thresholds_b=thresholds_b,
-                valid_fg_mask=valid_fg_mask_b.to(device),
+                covered_mask_b=covered_mask_b.to(device),
                 bg_idx=0,
             )
 
@@ -676,10 +675,14 @@ def main(
 
             if save_argmax_png:
                 save_png_mask(pred_a, output_dir / f"{wsi_id}_pred_head_a.png")
-                save_png_mask(pred_b_argmax, output_dir / f"{wsi_id}_pred_head_b_argmax.png")
+                save_png_mask(
+                    pred_b_argmax, output_dir / f"{wsi_id}_pred_head_b_argmax.png"
+                )
 
             if save_safe_png:
-                save_png_mask(pred_b_safe, output_dir / f"{wsi_id}_pred_head_b_safe.png")
+                save_png_mask(
+                    pred_b_safe, output_dir / f"{wsi_id}_pred_head_b_safe.png"
+                )
 
             if thumbnail is not None:
                 thumb_path = output_dir / f"{wsi_id}_thumbnail.png"
