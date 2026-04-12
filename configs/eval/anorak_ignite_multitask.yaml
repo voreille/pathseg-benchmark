@@ -1,0 +1,38 @@
+trainer:
+  callbacks:
+    - class_path: pathseg.evaluation.callbacks.SaveTwoHeadEvalCallback
+      init_args:
+        out_dir: /home/valentin/workspaces/pathseg-benchmark/data/evaluations/anorak_ignite/fragrant-music-139/
+        num_classes_a: 16
+        num_classes_b: 7
+        ignore_idx: 255
+        save_figures: true
+        save_pred_masks: false
+        save_logits_pt: false
+        write_per_image_csv: true
+        write_summary_json: true
+        class_names_a:
+          - Background
+          - Tumor epithelium
+          - Reactive epithelium
+          - Stroma
+          - Inflammation
+          - Alveolar tissue
+          - Fatty tissue
+          - Necrotic tissue
+          - Erythrocytes
+          - Bronchial epithelium
+          - Mucus/Plasma/Fluids
+          - Cartilage/Bone
+          - Macrophages
+          - Muscle
+          - Liver
+          - Keratinization
+        class_names_b:
+          - background
+          - cribriform
+          - micropapillary
+          - solid
+          - papillary
+          - acinar
+          - lepidic

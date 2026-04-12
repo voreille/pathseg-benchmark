@@ -53,6 +53,9 @@ HEAD_B_LABEL_MAP = {
 SAFE_AMBIGUOUS_ID = 255
 FG_UNION_PATTERN_ID = -2
 FG_UNION_PATTERN_NAME = "__fg_union__"
+EMPTY_CONFORMAL_SET_ID = -3
+EMPTY_CONFORMAL_SET_NAME = "empty_conformal_set"
+MULTI_CLASS_CONFORMAL_SET_NAME = "multi_class_conformal_set"
 
 
 def import_from_string(path: str):
@@ -331,6 +334,8 @@ def compute_conformal_head_b(
     set_size_b = torch.zeros((h, w), dtype=torch.uint8, device=avg_logits_b.device)
 
     if thresholds_b is None:
+        empty_conformal_set_mask = torch.zeros((h, w), dtype=torch.bool, device=avg_logits_b.device)
+        multi_class_conformal_set_mask = torch.zeros((h, w), dtype=torch.bool, device=avg_logits_b.device)
         return {
             "probs_b": probs_b,
             "pred_b_argmax": pred_b_argmax,
@@ -338,6 +343,8 @@ def compute_conformal_head_b(
             "possible_b": possible_b,
             "set_size_b": set_size_b,
             "apply_conformal_mask": apply_conformal_mask,
+            "empty_conformal_set_mask": empty_conformal_set_mask,
+            "multi_class_conformal_set_mask": multi_class_conformal_set_mask,
         }
 
     tau = 1.0 - thresholds_b
@@ -358,8 +365,10 @@ def compute_conformal_head_b(
             possible_b[:, singleton].float(), dim=0
         ).to(torch.uint8)
 
-    empty = apply_conformal_mask & (set_size_b == 0)
-    pred_b_safe[empty] = bg_idx
+    empty_conformal_set_mask = apply_conformal_mask & (set_size_b == 0)
+    pred_b_safe[empty_conformal_set_mask] = bg_idx
+
+    multi_class_conformal_set_mask = apply_conformal_mask & (set_size_b > 1)
 
     return {
         "probs_b": probs_b,
@@ -368,6 +377,8 @@ def compute_conformal_head_b(
         "possible_b": possible_b,
         "set_size_b": set_size_b,
         "apply_conformal_mask": apply_conformal_mask,
+        "empty_conformal_set_mask": empty_conformal_set_mask,
+        "multi_class_conformal_set_mask": multi_class_conformal_set_mask,
     }
 
 
@@ -376,6 +387,8 @@ def compute_area_stats_from_safe_possible(
     pred_b_safe: torch.Tensor,
     possible_b: torch.Tensor,
     covered_mask_b: torch.Tensor,
+    apply_conformal_mask: torch.Tensor,
+    set_size_b: torch.Tensor,
 ) -> dict[str, Any]:
     """
     Backward-compatible YAML summary for quick inspection.
@@ -391,12 +404,18 @@ def compute_area_stats_from_safe_possible(
             "safe_area_px": int(
                 ((pred_b_safe == cls_id) & covered_mask_b).sum().item()
             ),
-            "possible_area_px": int(possible_b[cls_id].sum().item()),
+            "max_possible_area_px": int(possible_b[cls_id].sum().item()),
         }
 
-    stats["ambiguous"] = {
-        "safe_area_px": int(
-            ((pred_b_safe == SAFE_AMBIGUOUS_ID) & covered_mask_b).sum().item()
+    stats["conformal_status"] = {
+        "singleton_conformal_set_area_px": int(
+            (apply_conformal_mask & (set_size_b == 1)).sum().item()
+        ),
+        "empty_conformal_set_area_px": int(
+            (apply_conformal_mask & (set_size_b == 0)).sum().item()
+        ),
+        "multi_class_conformal_set_area_px": int(
+            (apply_conformal_mask & (set_size_b > 1)).sum().item()
         ),
     }
     return stats
@@ -503,9 +522,9 @@ def build_head_b_rows(
     roi_mask: torch.Tensor,
     b_id_to_name: dict[int, str],
     prediction_type: str,
-    include_ambiguous: bool = False,
+    include_multi_class_conformal_set: bool = False,
 ) -> list[StatRow]:
-    max_id = SAFE_AMBIGUOUS_ID if include_ambiguous else max(b_id_to_name.keys())
+    max_id = SAFE_AMBIGUOUS_ID if include_multi_class_conformal_set else max(b_id_to_name.keys())
     counts = masked_bincount(pred_b, roi_mask, minlength=max_id + 1)
 
     rows: list[StatRow] = []
@@ -523,7 +542,7 @@ def build_head_b_rows(
             )
         )
 
-    if include_ambiguous:
+    if include_multi_class_conformal_set:
         rows.append(
             StatRow(
                 wsi_id=wsi_id,
@@ -532,11 +551,78 @@ def build_head_b_rows(
                 compartment_id=-1,
                 compartment_name="",
                 pattern_id=SAFE_AMBIGUOUS_ID,
-                pattern_name="ambiguous",
+                pattern_name=MULTI_CLASS_CONFORMAL_SET_NAME,
                 area_px=int(counts[SAFE_AMBIGUOUS_ID].item()),
             )
         )
     return rows
+
+
+def build_head_b_max_possible_rows(
+    wsi_id: str,
+    possible_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    b_id_to_name: dict[int, str],
+) -> list[StatRow]:
+    rows: list[StatRow] = []
+    for pat_id, pat_name in sorted(b_id_to_name.items()):
+        area = int((possible_b[pat_id] & roi_mask).sum().item())
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="head_b",
+                prediction_type="max_possible",
+                compartment_id=-1,
+                compartment_name="",
+                pattern_id=pat_id,
+                pattern_name=pat_name,
+                area_px=area,
+            )
+        )
+    return rows
+
+
+def build_head_b_conformal_status_rows(
+    wsi_id: str,
+    apply_conformal_mask: torch.Tensor,
+    set_size_b: torch.Tensor,
+) -> list[StatRow]:
+    singleton_area = int((apply_conformal_mask & (set_size_b == 1)).sum().item())
+    empty_area = int((apply_conformal_mask & (set_size_b == 0)).sum().item())
+    multi_area = int((apply_conformal_mask & (set_size_b > 1)).sum().item())
+
+    return [
+        StatRow(
+            wsi_id=wsi_id,
+            stat_type="head_b_conformal_status",
+            prediction_type="safe",
+            compartment_id=-1,
+            compartment_name="",
+            pattern_id=-1,
+            pattern_name="singleton_conformal_set",
+            area_px=singleton_area,
+        ),
+        StatRow(
+            wsi_id=wsi_id,
+            stat_type="head_b_conformal_status",
+            prediction_type="safe",
+            compartment_id=-1,
+            compartment_name="",
+            pattern_id=EMPTY_CONFORMAL_SET_ID,
+            pattern_name=EMPTY_CONFORMAL_SET_NAME,
+            area_px=empty_area,
+        ),
+        StatRow(
+            wsi_id=wsi_id,
+            stat_type="head_b_conformal_status",
+            prediction_type="safe",
+            compartment_id=-1,
+            compartment_name="",
+            pattern_id=SAFE_AMBIGUOUS_ID,
+            pattern_name=MULTI_CLASS_CONFORMAL_SET_NAME,
+            area_px=multi_area,
+        ),
+    ]
 
 
 def build_a_by_b_rows(
@@ -547,10 +633,10 @@ def build_a_by_b_rows(
     a_id_to_name: dict[int, str],
     b_id_to_name: dict[int, str],
     prediction_type: str,
-    include_ambiguous: bool = False,
+    include_multi_class_conformal_set: bool = False,
 ) -> list[StatRow]:
     num_a = max(a_id_to_name.keys()) + 1
-    num_b = SAFE_AMBIGUOUS_ID + 1 if include_ambiguous else max(b_id_to_name.keys()) + 1
+    num_b = SAFE_AMBIGUOUS_ID + 1 if include_multi_class_conformal_set else max(b_id_to_name.keys()) + 1
 
     counts = masked_joint_bincount(
         values_a=pred_a,
@@ -576,7 +662,7 @@ def build_a_by_b_rows(
                 )
             )
 
-        if include_ambiguous:
+        if include_multi_class_conformal_set:
             rows.append(
                 StatRow(
                     wsi_id=wsi_id,
@@ -585,8 +671,41 @@ def build_a_by_b_rows(
                     compartment_id=comp_id,
                     compartment_name=comp_name,
                     pattern_id=SAFE_AMBIGUOUS_ID,
-                    pattern_name="ambiguous",
+                    pattern_name=MULTI_CLASS_CONFORMAL_SET_NAME,
                     area_px=int(counts[comp_id, SAFE_AMBIGUOUS_ID].item()),
+                )
+            )
+    return rows
+
+
+def build_a_by_b_max_possible_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    possible_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    a_id_to_name: dict[int, str],
+    b_id_to_name: dict[int, str],
+) -> list[StatRow]:
+    rows: list[StatRow] = []
+    num_a = max(a_id_to_name.keys()) + 1
+
+    for pat_id, pat_name in sorted(b_id_to_name.items()):
+        counts = masked_bincount(
+            pred_a,
+            roi_mask & possible_b[pat_id],
+            minlength=num_a,
+        )
+        for comp_id, comp_name in sorted(a_id_to_name.items()):
+            rows.append(
+                StatRow(
+                    wsi_id=wsi_id,
+                    stat_type="a_by_b",
+                    prediction_type="max_possible",
+                    compartment_id=comp_id,
+                    compartment_name=comp_name,
+                    pattern_id=pat_id,
+                    pattern_name=pat_name,
+                    area_px=int(counts[comp_id].item()),
                 )
             )
     return rows
@@ -600,7 +719,7 @@ def build_a_by_b_binary_rows(
     a_id_to_name: dict[int, str],
     bg_idx: int,
     prediction_type: str,
-    ambiguous_id: int | None = None,
+    multi_class_id: int | None = None,
 ) -> list[StatRow]:
     rows: list[StatRow] = []
     num_a = max(a_id_to_name.keys()) + 1
@@ -611,12 +730,12 @@ def build_a_by_b_binary_rows(
     bg_counts = masked_bincount(pred_a, bg_mask, minlength=num_a)
     fg_counts = masked_bincount(pred_a, fg_mask, minlength=num_a)
 
-    amb_counts = None
-    if ambiguous_id is not None:
-        amb_mask = roi_mask & (pred_b == ambiguous_id)
-        fg_mask = roi_mask & (pred_b != bg_idx) & (pred_b != ambiguous_id)
+    multi_counts = None
+    if multi_class_id is not None:
+        multi_mask = roi_mask & (pred_b == multi_class_id)
+        fg_mask = roi_mask & (pred_b != bg_idx) & (pred_b != multi_class_id)
         fg_counts = masked_bincount(pred_a, fg_mask, minlength=num_a)
-        amb_counts = masked_bincount(pred_a, amb_mask, minlength=num_a)
+        multi_counts = masked_bincount(pred_a, multi_mask, minlength=num_a)
 
     for comp_id, comp_name in sorted(a_id_to_name.items()):
         rows.append(
@@ -644,7 +763,7 @@ def build_a_by_b_binary_rows(
             )
         )
 
-        if amb_counts is not None:
+        if multi_counts is not None:
             rows.append(
                 StatRow(
                     wsi_id=wsi_id,
@@ -653,10 +772,55 @@ def build_a_by_b_binary_rows(
                     compartment_id=comp_id,
                     compartment_name=comp_name,
                     pattern_id=SAFE_AMBIGUOUS_ID,
-                    pattern_name="ambiguous",
-                    area_px=int(amb_counts[comp_id].item()),
+                    pattern_name=MULTI_CLASS_CONFORMAL_SET_NAME,
+                    area_px=int(multi_counts[comp_id].item()),
                 )
             )
+
+    return rows
+
+
+def build_a_by_b_binary_max_possible_rows(
+    wsi_id: str,
+    pred_a: torch.Tensor,
+    possible_b: torch.Tensor,
+    roi_mask: torch.Tensor,
+    a_id_to_name: dict[int, str],
+) -> list[StatRow]:
+    rows: list[StatRow] = []
+    num_a = max(a_id_to_name.keys()) + 1
+
+    fg_union_mask = roi_mask & possible_b.any(dim=0)
+    bg_mask = roi_mask & ~possible_b.any(dim=0)
+
+    bg_counts = masked_bincount(pred_a, bg_mask, minlength=num_a)
+    fg_counts = masked_bincount(pred_a, fg_union_mask, minlength=num_a)
+
+    for comp_id, comp_name in sorted(a_id_to_name.items()):
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="a_by_b_binary",
+                prediction_type="max_possible",
+                compartment_id=comp_id,
+                compartment_name=comp_name,
+                pattern_id=0,
+                pattern_name="background",
+                area_px=int(bg_counts[comp_id].item()),
+            )
+        )
+        rows.append(
+            StatRow(
+                wsi_id=wsi_id,
+                stat_type="a_by_b_binary",
+                prediction_type="max_possible",
+                compartment_id=comp_id,
+                compartment_name=comp_name,
+                pattern_id=FG_UNION_PATTERN_ID,
+                pattern_name=FG_UNION_PATTERN_NAME,
+                area_px=int(fg_counts[comp_id].item()),
+            )
+        )
 
     return rows
 
@@ -666,6 +830,9 @@ def build_slide_stats_rows(
     pred_a: torch.Tensor,
     pred_b_argmax: torch.Tensor,
     pred_b_safe: torch.Tensor,
+    possible_b: torch.Tensor,
+    apply_conformal_mask: torch.Tensor,
+    set_size_b: torch.Tensor,
     covered_mask_a: torch.Tensor,
     covered_mask_b: torch.Tensor,
     head_a_label_map: dict[str, int],
@@ -674,7 +841,6 @@ def build_slide_stats_rows(
     a_id_to_name = make_id_to_name(head_a_label_map, ignore_ids={255})
     b_id_to_name = make_id_to_name(head_b_label_map)
 
-    # Restrict stats to modeled regions, not full-slide padded background.
     roi_a = covered_mask_a.bool()
     roi_b = covered_mask_b.bool()
     roi_ab = (covered_mask_a & covered_mask_b).bool()
@@ -693,7 +859,22 @@ def build_slide_stats_rows(
             roi_b,
             b_id_to_name,
             prediction_type="safe",
-            include_ambiguous=True,
+            include_multi_class_conformal_set=True,
+        )
+    )
+    rows.extend(
+        build_head_b_max_possible_rows(
+            wsi_id=wsi_id,
+            possible_b=possible_b,
+            roi_mask=roi_b,
+            b_id_to_name=b_id_to_name,
+        )
+    )
+    rows.extend(
+        build_head_b_conformal_status_rows(
+            wsi_id=wsi_id,
+            apply_conformal_mask=apply_conformal_mask,
+            set_size_b=set_size_b,
         )
     )
     rows.extend(
@@ -705,7 +886,7 @@ def build_slide_stats_rows(
             a_id_to_name,
             b_id_to_name,
             prediction_type="argmax",
-            include_ambiguous=False,
+            include_multi_class_conformal_set=False,
         )
     )
     rows.extend(
@@ -717,7 +898,17 @@ def build_slide_stats_rows(
             a_id_to_name,
             b_id_to_name,
             prediction_type="safe",
-            include_ambiguous=True,
+            include_multi_class_conformal_set=True,
+        )
+    )
+    rows.extend(
+        build_a_by_b_max_possible_rows(
+            wsi_id=wsi_id,
+            pred_a=pred_a,
+            possible_b=possible_b,
+            roi_mask=roi_ab,
+            a_id_to_name=a_id_to_name,
+            b_id_to_name=b_id_to_name,
         )
     )
     rows.extend(
@@ -729,7 +920,7 @@ def build_slide_stats_rows(
             a_id_to_name=a_id_to_name,
             bg_idx=0,
             prediction_type="argmax",
-            ambiguous_id=None,
+            multi_class_id=None,
         )
     )
     rows.extend(
@@ -741,7 +932,16 @@ def build_slide_stats_rows(
             a_id_to_name=a_id_to_name,
             bg_idx=0,
             prediction_type="safe",
-            ambiguous_id=SAFE_AMBIGUOUS_ID,
+            multi_class_id=SAFE_AMBIGUOUS_ID,
+        )
+    )
+    rows.extend(
+        build_a_by_b_binary_max_possible_rows(
+            wsi_id=wsi_id,
+            pred_a=pred_a,
+            possible_b=possible_b,
+            roi_mask=roi_ab,
+            a_id_to_name=a_id_to_name,
         )
     )
     return rows
@@ -992,12 +1192,17 @@ def main(
             pred_b_safe = conformal_b["pred_b_safe"].cpu()
             possible_b = conformal_b["possible_b"].cpu()
             set_size_b = conformal_b["set_size_b"].cpu()
+            apply_conformal_mask = conformal_b["apply_conformal_mask"].cpu()
+            empty_conformal_set_mask = conformal_b["empty_conformal_set_mask"].cpu()
+            multi_class_conformal_set_mask = conformal_b["multi_class_conformal_set_mask"].cpu()
 
             area_stats_b = compute_area_stats_from_safe_possible(
                 pred_b_argmax=pred_b_argmax,
                 pred_b_safe=pred_b_safe,
                 possible_b=possible_b,
                 covered_mask_b=covered_mask_b,
+                apply_conformal_mask=apply_conformal_mask,
+                set_size_b=set_size_b,
             )
 
             slide_stat_rows = build_slide_stats_rows(
@@ -1005,6 +1210,9 @@ def main(
                 pred_a=pred_a,
                 pred_b_argmax=pred_b_argmax,
                 pred_b_safe=pred_b_safe,
+                possible_b=possible_b,
+                apply_conformal_mask=apply_conformal_mask,
+                set_size_b=set_size_b,
                 covered_mask_a=covered_mask_a,
                 covered_mask_b=covered_mask_b,
                 head_a_label_map=HEAD_A_LABEL_MAP,
@@ -1019,7 +1227,11 @@ def main(
                 "pred_b_argmax": pred_b_argmax,
                 "pred_b_safe": pred_b_safe,
                 "possible_b": possible_b,
+                "max_possible_b": possible_b,
                 "set_size_b": set_size_b,
+                "apply_conformal_mask": apply_conformal_mask,
+                "empty_conformal_set_mask": empty_conformal_set_mask,
+                "multi_class_conformal_set_mask": multi_class_conformal_set_mask,
                 "covered_mask_a": covered_mask_a,
                 "covered_mask_b": covered_mask_b,
                 "valid_fg_mask_b": valid_fg_mask_b,
@@ -1049,6 +1261,14 @@ def main(
             if save_safe_png:
                 save_png_mask(
                     pred_b_safe, output_dir / f"{wsi_id}_pred_head_b_safe.png"
+                )
+                save_png_mask(
+                    empty_conformal_set_mask.to(torch.uint8),
+                    output_dir / f"{wsi_id}_empty_conformal_set.png",
+                )
+                save_png_mask(
+                    multi_class_conformal_set_mask.to(torch.uint8),
+                    output_dir / f"{wsi_id}_multi_class_conformal_set.png",
                 )
 
             if thumbnail is not None:

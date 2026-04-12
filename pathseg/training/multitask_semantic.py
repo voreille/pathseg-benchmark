@@ -185,7 +185,69 @@ class TwoHeadSemantic(LightningModule):
         return self.eval_step(batch, batch_idx, dataloader_idx, log_prefix="val")
 
     def test_step(self, batch, batch_idx=0, dataloader_idx=0):
-        return self.eval_step(batch, batch_idx, dataloader_idx, log_prefix="test")
+        imgs, targets, source_ids, image_ids = batch
+
+        crops, origins, img_sizes = self.window_imgs_semantic(imgs)
+        crop_out = self(crops)
+
+        if isinstance(crop_out, dict):
+            crop_logits_a = crop_out["logits_a"]
+            crop_logits_b = crop_out["logits_b"]
+        else:
+            crop_logits_a, crop_logits_b = crop_out
+
+        crop_logits_a = F.interpolate(crop_logits_a, self.img_size, mode="bilinear")
+        crop_logits_b = F.interpolate(crop_logits_b, self.img_size, mode="bilinear")
+
+        logits_a_list = self.revert_window_logits_semantic(
+            crop_logits_a, origins, img_sizes
+        )
+        logits_b_list = self.revert_window_logits_semantic(
+            crop_logits_b, origins, img_sizes
+        )
+
+        targets_pp = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+
+        # ---- KEEP your existing metric logging ----
+        sid0 = int(source_ids[0])
+        self.update_metrics(
+            logits_a_list if sid0 == self.source_id_a else logits_b_list,
+            targets_pp,
+            dataloader_idx,
+        )
+
+        # ---- RETURN outputs for callback ----
+        outs = []
+        for i, (sid, img_id, tgt, logit_a, logit_b) in enumerate(
+            zip(source_ids, image_ids, targets_pp, logits_a_list, logits_b_list)
+        ):
+            sid = int(sid)
+
+            if sid == self.source_id_a:
+                gt_head = "a"
+                pred_supervised = torch.argmax(logit_a, dim=0)
+            elif sid == self.source_id_b:
+                gt_head = "b"
+                pred_supervised = torch.argmax(logit_b, dim=0)
+            else:
+                continue  # skip unknown
+
+            outs.append(
+                {
+                    "img_id": img_id,
+                    "gt_head": gt_head,
+                    "source_id": sid,
+                    "img": imgs[i].detach().cpu(),
+                    "target": tgt.detach().cpu(),
+                    "pred_a": torch.argmax(logit_a, dim=0).detach().cpu(),
+                    "pred_b": torch.argmax(logit_b, dim=0).detach().cpu(),
+                    "pred_supervised": pred_supervised.detach().cpu(),
+                    "logits_a": logit_a.detach().cpu(),
+                    "logits_b": logit_b.detach().cpu(),
+                }
+            )
+
+        return outs
 
     def eval_step(
         self,

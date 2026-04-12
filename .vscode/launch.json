@@ -97,6 +97,31 @@
             "justMyCode": false
         },
         {
+            "name": "Python: main.py test ANORAK+IGNITE MultiTask Semantic",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "test",
+                "-c",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/o4jre4vk/config.yaml",
+                "-c",
+                "configs/eval/anorak_ignite_multitask.yaml",
+                "--no_compile",
+                "--ckpt_path",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/o4jre4vk/epoch=106-step=40000.ckpt",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+ 
+        {
             "name": "Python: main.py predict ANORAK+IGNITE Prototype MultiTask Semantic",
             "type": "debugpy",
             "request": "launch",
@@ -353,13 +378,13 @@
             "program": "${workspaceFolder}/pathseg/export/export_and_calibrate.py",
             "args": [
                 "--config-path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/ber4l7zg/loading_config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/o4jre4vk/loading_config.yaml",
                 "--ckpt-path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/ber4l7zg/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/o4jre4vk/epoch=106-step=40000.ckpt",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137/",
+                "/home/valentin/workspaces/pathseg-benchmark/models/fragrant-music-139/",
                 "--calibration-config-path",
-                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126/calibration_config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/models/fragrant-music-139/calibration_config.yaml",
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -383,7 +408,7 @@
                 "--slides-dir",
                 "/mnt/nas7/data/Personal/Valentin/DartmouthLungCancerHistologyDataset/DHMC_LUAD_corr",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions",
+                "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/predictions/giddy-spaceship-137",
                 "--model-dir",
                 "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137",
                 "--batch-size",
