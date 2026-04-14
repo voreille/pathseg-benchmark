@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib
 import math
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
@@ -215,6 +216,7 @@ def load_model_and_conformal(
     state_dict = torch.load(weights_pt, map_location="cpu")
     model.load_state_dict(state_dict)
     model.eval()
+
     img_size = model_init_args.get("img_size", None)
 
     conformal_cfg = None
@@ -225,18 +227,19 @@ def load_model_and_conformal(
     return model, img_size, conformal_cfg
 
 
+def normalize_img_size(img_size: Any) -> tuple[int, int]:
+    if isinstance(img_size, int):
+        return (img_size, img_size)
+    if isinstance(img_size, (list, tuple)) and len(img_size) == 2:
+        return (int(img_size[0]), int(img_size[1]))
+    raise TypeError(f"Unsupported img_size type: {type(img_size)}")
+
+
 def get_head_b_thresholds(
     conformal_cfg: dict[str, Any] | None,
     num_classes: int,
     bg_idx: int = 0,
 ) -> torch.Tensor | None:
-    """
-    Returns thresholds tensor of shape [C].
-    Background is always set to NaN because it is excluded from conformal logic.
-    Supports thresholds stored either for:
-      - all classes [C]
-      - foreground classes only [C-1]
-    """
     if conformal_cfg is None:
         return None
 
@@ -276,11 +279,6 @@ def compute_head_a_prediction(
     covered_mask_a: torch.Tensor,
     bg_idx: int = 0,
 ) -> dict[str, torch.Tensor]:
-    """
-    Head A:
-      - uncovered pixels => forced background
-      - covered pixels => standard softmax over all classes
-    """
     probs_a = torch.softmax(avg_logits_a, dim=0)
     probs_a = probs_a.clone()
 
@@ -305,12 +303,6 @@ def compute_conformal_head_b(
     support_mask: torch.Tensor | None = None,
     bg_idx: int = 0,
 ) -> dict[str, torch.Tensor]:
-    """
-    avg_logits_b: [C,H,W]
-    thresholds_b: [C] with NaN for excluded classes, typically bg=NaN
-    covered_mask_b: [H,W] bool
-    support_mask: optional extra mask, e.g. from head A
-    """
     if avg_logits_b.ndim != 3:
         raise ValueError(
             f"avg_logits_b must be [C,H,W], got {tuple(avg_logits_b.shape)}"
@@ -334,8 +326,12 @@ def compute_conformal_head_b(
     set_size_b = torch.zeros((h, w), dtype=torch.uint8, device=avg_logits_b.device)
 
     if thresholds_b is None:
-        empty_conformal_set_mask = torch.zeros((h, w), dtype=torch.bool, device=avg_logits_b.device)
-        multi_class_conformal_set_mask = torch.zeros((h, w), dtype=torch.bool, device=avg_logits_b.device)
+        empty_conformal_set_mask = torch.zeros(
+            (h, w), dtype=torch.bool, device=avg_logits_b.device
+        )
+        multi_class_conformal_set_mask = torch.zeros(
+            (h, w), dtype=torch.bool, device=avg_logits_b.device
+        )
         return {
             "probs_b": probs_b,
             "pred_b_argmax": pred_b_argmax,
@@ -390,9 +386,6 @@ def compute_area_stats_from_safe_possible(
     apply_conformal_mask: torch.Tensor,
     set_size_b: torch.Tensor,
 ) -> dict[str, Any]:
-    """
-    Backward-compatible YAML summary for quick inspection.
-    """
     stats: dict[str, Any] = {}
     num_classes = int(possible_b.shape[0])
 
@@ -434,6 +427,68 @@ class StatRow:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class TimingRow:
+    wsi_id: str
+    num_tiles: int
+    num_batches: int
+    elapsed_s: float
+    elapsed_min: float
+    tiles_per_s: float
+    batches_per_s: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    device: torch.device
+    use_amp: bool
+    amp_dtype: torch.dtype
+    batch_size: int
+    num_workers: int
+    output_target_mpp: float
+    save_pt: bool
+    save_argmax_png: bool
+    save_safe_png: bool
+
+
+@dataclass(frozen=True)
+class SlideGeometry:
+    wsi_id: str
+    level0_w: int
+    level0_h: int
+    mask_w: int
+    mask_h: int
+    fx: float
+    fy: float
+    mpp: float
+    thumbnail: Image.Image | None
+
+
+@dataclass
+class SlideOutputs:
+    wsi_id: str
+    avg_logits_a: torch.Tensor
+    avg_logits_b: torch.Tensor
+    pred_a: torch.Tensor
+    pred_b_argmax: torch.Tensor
+    pred_b_safe: torch.Tensor
+    possible_b: torch.Tensor
+    set_size_b: torch.Tensor
+    apply_conformal_mask: torch.Tensor
+    empty_conformal_set_mask: torch.Tensor
+    multi_class_conformal_set_mask: torch.Tensor
+    covered_mask_a: torch.Tensor
+    covered_mask_b: torch.Tensor
+    valid_fg_mask_b: torch.Tensor
+    area_stats_b: dict[str, Any]
+    slide_stat_rows: list[StatRow]
+    timing_row: TimingRow
+    geometry: SlideGeometry
 
 
 def make_id_to_name(
@@ -524,7 +579,11 @@ def build_head_b_rows(
     prediction_type: str,
     include_multi_class_conformal_set: bool = False,
 ) -> list[StatRow]:
-    max_id = SAFE_AMBIGUOUS_ID if include_multi_class_conformal_set else max(b_id_to_name.keys())
+    max_id = (
+        SAFE_AMBIGUOUS_ID
+        if include_multi_class_conformal_set
+        else max(b_id_to_name.keys())
+    )
     counts = masked_bincount(pred_b, roi_mask, minlength=max_id + 1)
 
     rows: list[StatRow] = []
@@ -636,7 +695,11 @@ def build_a_by_b_rows(
     include_multi_class_conformal_set: bool = False,
 ) -> list[StatRow]:
     num_a = max(a_id_to_name.keys()) + 1
-    num_b = SAFE_AMBIGUOUS_ID + 1 if include_multi_class_conformal_set else max(b_id_to_name.keys()) + 1
+    num_b = (
+        SAFE_AMBIGUOUS_ID + 1
+        if include_multi_class_conformal_set
+        else max(b_id_to_name.keys()) + 1
+    )
 
     counts = masked_joint_bincount(
         values_a=pred_a,
@@ -956,6 +1019,415 @@ def write_stat_rows_csv(path: Path, rows: Iterable[StatRow]) -> None:
             writer.writerow(row.to_dict())
 
 
+def append_timing_row_csv(path: Path, row: TimingRow) -> None:
+    fieldnames = list(TimingRow.__dataclass_fields__.keys())
+    file_exists = path.exists()
+
+    with path.open("a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row.to_dict())
+
+
+def sync_if_needed(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def build_runtime_config(
+    batch_size: int,
+    num_workers: int,
+    gpu_id: int,
+    output_target_mpp: float,
+    no_autocast: bool,
+    autocast_dtype: str,
+    save_pt: bool,
+    save_argmax_png: bool,
+    save_safe_png: bool,
+) -> RuntimeConfig:
+    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
+    use_amp = (device.type == "cuda") and (not no_autocast)
+    amp_dtype = get_autocast_dtype(autocast_dtype)
+
+    return RuntimeConfig(
+        device=device,
+        use_amp=use_amp,
+        amp_dtype=amp_dtype,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        output_target_mpp=output_target_mpp,
+        save_pt=save_pt,
+        save_argmax_png=save_argmax_png,
+        save_safe_png=save_safe_png,
+    )
+
+
+def build_slide_geometry(
+    wsi: openslide.OpenSlide,
+    wsi_id: str,
+    output_target_mpp: float,
+    need_thumbnail: bool,
+) -> SlideGeometry:
+    mpp = get_mpp(wsi)
+    level0_w, level0_h = wsi.level_dimensions[0]
+
+    mask_h = int(math.ceil(level0_h * mpp / output_target_mpp))
+    mask_w = int(math.ceil(level0_w * mpp / output_target_mpp))
+
+    thumbnail = None
+    if need_thumbnail:
+        thumbnail = wsi.get_thumbnail((mask_w, mask_h))
+        mask_w, mask_h = thumbnail.size
+
+    fx = level0_w / mask_w
+    fy = level0_h / mask_h
+
+    return SlideGeometry(
+        wsi_id=wsi_id,
+        level0_w=level0_w,
+        level0_h=level0_h,
+        mask_w=mask_w,
+        mask_h=mask_h,
+        fx=fx,
+        fy=fy,
+        mpp=mpp,
+        thumbnail=thumbnail,
+    )
+
+
+def run_model_on_tiles(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    use_amp: bool,
+    amp_dtype: torch.dtype,
+) -> Iterable[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    for tiles, xy0 in tqdm(loader, desc="Tiles", leave=False):
+        tiles = tiles.to(device, non_blocking=True)
+
+        with torch.inference_mode():
+            if use_amp:
+                with torch.autocast(device_type="cuda", dtype=amp_dtype):
+                    out = model(tiles)
+            else:
+                out = model(tiles)
+
+        required_keys = {"logits_a", "logits_b"}
+        missing = required_keys - set(out.keys())
+        if missing:
+            raise KeyError(f"Model output missing required keys: {sorted(missing)}")
+
+        logits_a_cpu = out["logits_a"].detach().float().cpu()
+        logits_b_cpu = out["logits_b"].detach().float().cpu()
+        yield logits_a_cpu, logits_b_cpu, xy0.cpu()
+
+
+def stitch_slide_logits(
+    loader: DataLoader,
+    model: torch.nn.Module,
+    ds: TileDataset,
+    geometry: SlideGeometry,
+    runtime_cfg: RuntimeConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    level_downsample = float(ds.wsi.level_downsamples[ds.tile_level])
+    tile_extent0 = ds.tile_size_lvl * level_downsample
+
+    sum_map_a: Optional[torch.Tensor] = None
+    sum_map_b: Optional[torch.Tensor] = None
+    w_map_a = torch.zeros((geometry.mask_h, geometry.mask_w), dtype=torch.float32)
+    w_map_b = torch.zeros((geometry.mask_h, geometry.mask_w), dtype=torch.float32)
+
+    for logits_a_cpu, logits_b_cpu, xy0_cpu in run_model_on_tiles(
+        model=model,
+        loader=loader,
+        device=runtime_cfg.device,
+        use_amp=runtime_cfg.use_amp,
+        amp_dtype=runtime_cfg.amp_dtype,
+    ):
+        if sum_map_a is None:
+            sum_map_a = torch.zeros(
+                (int(logits_a_cpu.shape[1]), geometry.mask_h, geometry.mask_w),
+                dtype=torch.float32,
+            )
+
+        if sum_map_b is None:
+            sum_map_b = torch.zeros(
+                (int(logits_b_cpu.shape[1]), geometry.mask_h, geometry.mask_w),
+                dtype=torch.float32,
+            )
+
+        for b, (x0, y0) in enumerate(xy0_cpu.tolist()):
+            x0m, y0m, x1m, y1m = bbox_level0_to_mask_rect(
+                x0=int(x0),
+                y0=int(y0),
+                extent0_w=tile_extent0,
+                extent0_h=tile_extent0,
+                fx=geometry.fx,
+                fy=geometry.fy,
+            )
+            out_w = x1m - x0m
+            out_h = y1m - y0m
+
+            tile_logits_a = F.interpolate(
+                logits_a_cpu[b : b + 1],
+                size=(out_h, out_w),
+                mode="bilinear",
+                align_corners=False,
+            )[0]
+
+            tile_logits_b = F.interpolate(
+                logits_b_cpu[b : b + 1],
+                size=(out_h, out_w),
+                mode="bilinear",
+                align_corners=False,
+            )[0]
+
+            accumulate_tile_into_canvas(
+                sum_map=sum_map_a,
+                w_map=w_map_a,
+                tile_logits=tile_logits_a,
+                x0m=x0m,
+                y0m=y0m,
+                x1m=x1m,
+                y1m=y1m,
+            )
+            accumulate_tile_into_canvas(
+                sum_map=sum_map_b,
+                w_map=w_map_b,
+                tile_logits=tile_logits_b,
+                x0m=x0m,
+                y0m=y0m,
+                x1m=x1m,
+                y1m=y1m,
+            )
+
+    if sum_map_a is None or sum_map_b is None:
+        raise RuntimeError(f"No tiles processed for {geometry.wsi_id}.")
+
+    avg_logits_a = finalize_canvas(sum_map_a, w_map_a)
+    avg_logits_b = finalize_canvas(sum_map_b, w_map_b)
+    return avg_logits_a, avg_logits_b, w_map_a, w_map_b
+
+
+def build_payload(
+    outputs: SlideOutputs,
+    output_target_mpp: float,
+) -> dict[str, Any]:
+    return {
+        "wsi_id": outputs.wsi_id,
+        "avg_logits_a": outputs.avg_logits_a,
+        "avg_logits_b": outputs.avg_logits_b,
+        "pred_a": outputs.pred_a,
+        "pred_b_argmax": outputs.pred_b_argmax,
+        "pred_b_safe": outputs.pred_b_safe,
+        "possible_b": outputs.possible_b,
+        "max_possible_b": outputs.possible_b,
+        "set_size_b": outputs.set_size_b,
+        "apply_conformal_mask": outputs.apply_conformal_mask,
+        "empty_conformal_set_mask": outputs.empty_conformal_set_mask,
+        "multi_class_conformal_set_mask": outputs.multi_class_conformal_set_mask,
+        "covered_mask_a": outputs.covered_mask_a,
+        "covered_mask_b": outputs.covered_mask_b,
+        "valid_fg_mask_b": outputs.valid_fg_mask_b,
+        "area_stats_b": outputs.area_stats_b,
+        "mask_h": outputs.geometry.mask_h,
+        "mask_w": outputs.geometry.mask_w,
+        "level0_w": outputs.geometry.level0_w,
+        "level0_h": outputs.geometry.level0_h,
+        "fx": outputs.geometry.fx,
+        "fy": outputs.geometry.fy,
+        "output_target_mpp": float(output_target_mpp),
+        "head_a_label_map": HEAD_A_LABEL_MAP,
+        "head_b_label_map": HEAD_B_LABEL_MAP,
+        "timing": outputs.timing_row.to_dict(),
+    }
+
+
+def write_slide_outputs(
+    output_dir: Path,
+    outputs: SlideOutputs,
+    output_target_mpp: float,
+    save_pt: bool,
+    save_argmax_png: bool,
+    save_safe_png: bool,
+) -> None:
+    if save_pt:
+        out_path = output_dir / f"{outputs.wsi_id}_stitched.pt"
+        torch.save(build_payload(outputs, output_target_mpp), out_path)
+
+    if save_argmax_png:
+        save_png_mask(outputs.pred_a, output_dir / f"{outputs.wsi_id}_pred_head_a.png")
+        save_png_mask(
+            outputs.pred_b_argmax,
+            output_dir / f"{outputs.wsi_id}_pred_head_b_argmax.png",
+        )
+
+    if save_safe_png:
+        save_png_mask(
+            outputs.pred_b_safe,
+            output_dir / f"{outputs.wsi_id}_pred_head_b_safe.png",
+        )
+        save_png_mask(
+            outputs.empty_conformal_set_mask.to(torch.uint8),
+            output_dir / f"{outputs.wsi_id}_empty_conformal_set.png",
+        )
+        save_png_mask(
+            outputs.multi_class_conformal_set_mask.to(torch.uint8),
+            output_dir / f"{outputs.wsi_id}_multi_class_conformal_set.png",
+        )
+
+    if outputs.geometry.thumbnail is not None:
+        thumb_path = output_dir / f"{outputs.wsi_id}_thumbnail.png"
+        outputs.geometry.thumbnail.save(thumb_path)
+
+    stats_path = output_dir / f"{outputs.wsi_id}_area_stats_b.yaml"
+    with stats_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(outputs.area_stats_b, f, sort_keys=False)
+
+    slide_stats_csv_path = output_dir / f"{outputs.wsi_id}_slide_stats.csv"
+    write_stat_rows_csv(slide_stats_csv_path, outputs.slide_stat_rows)
+
+    append_timing_row_csv(output_dir / "slide_timing.csv", outputs.timing_row)
+
+
+def process_single_slide(
+    wsi_path: Path,
+    tiling_store: Any,
+    model: torch.nn.Module,
+    thresholds_b: torch.Tensor | None,
+    tile_transform: Any,
+    runtime_cfg: RuntimeConfig,
+) -> SlideOutputs:
+    wsi_id = wsi_path.stem
+    coords, _cont_idx, attrs = tiling_store.load_coords(wsi_id)
+
+    wsi = openslide.OpenSlide(str(wsi_path))
+    try:
+        geometry = build_slide_geometry(
+            wsi=wsi,
+            wsi_id=wsi_id,
+            output_target_mpp=runtime_cfg.output_target_mpp,
+            need_thumbnail=(runtime_cfg.save_argmax_png or runtime_cfg.save_safe_png),
+        )
+
+        ds = TileDataset(
+            wsi=wsi,
+            coords=coords,
+            attrs=attrs,
+            transforms=tile_transform,
+        )
+        loader = DataLoader(
+            ds,
+            batch_size=runtime_cfg.batch_size,
+            shuffle=False,
+            num_workers=runtime_cfg.num_workers,
+            pin_memory=(runtime_cfg.device.type == "cuda"),
+        )
+
+        num_tiles = len(ds)
+        num_batches = len(loader)
+
+        sync_if_needed(runtime_cfg.device)
+        t0 = time.perf_counter()
+
+        avg_logits_a, avg_logits_b, w_map_a, w_map_b = stitch_slide_logits(
+            loader=loader,
+            model=model,
+            ds=ds,
+            geometry=geometry,
+            runtime_cfg=runtime_cfg,
+        )
+
+        sync_if_needed(runtime_cfg.device)
+        elapsed_s = time.perf_counter() - t0
+
+        covered_mask_a = compute_covered_mask(w_map_a)
+        covered_mask_b = compute_covered_mask(w_map_b)
+
+        head_a = compute_head_a_prediction(
+            avg_logits_a=avg_logits_a,
+            covered_mask_a=covered_mask_a,
+            bg_idx=0,
+        )
+        pred_a = head_a["pred_a"]
+
+        valid_fg_mask_b = covered_mask_b & (pred_a != 0)
+
+        conformal_b = compute_conformal_head_b(
+            avg_logits_b=avg_logits_b.to(runtime_cfg.device),
+            thresholds_b=thresholds_b,
+            covered_mask_b=covered_mask_b.to(runtime_cfg.device),
+            bg_idx=0,
+        )
+
+        pred_b_argmax = conformal_b["pred_b_argmax"].cpu()
+        pred_b_safe = conformal_b["pred_b_safe"].cpu()
+        possible_b = conformal_b["possible_b"].cpu()
+        set_size_b = conformal_b["set_size_b"].cpu()
+        apply_conformal_mask = conformal_b["apply_conformal_mask"].cpu()
+        empty_conformal_set_mask = conformal_b["empty_conformal_set_mask"].cpu()
+        multi_class_conformal_set_mask = conformal_b[
+            "multi_class_conformal_set_mask"
+        ].cpu()
+
+        area_stats_b = compute_area_stats_from_safe_possible(
+            pred_b_argmax=pred_b_argmax,
+            pred_b_safe=pred_b_safe,
+            possible_b=possible_b,
+            covered_mask_b=covered_mask_b,
+            apply_conformal_mask=apply_conformal_mask,
+            set_size_b=set_size_b,
+        )
+
+        slide_stat_rows = build_slide_stats_rows(
+            wsi_id=wsi_id,
+            pred_a=pred_a,
+            pred_b_argmax=pred_b_argmax,
+            pred_b_safe=pred_b_safe,
+            possible_b=possible_b,
+            apply_conformal_mask=apply_conformal_mask,
+            set_size_b=set_size_b,
+            covered_mask_a=covered_mask_a,
+            covered_mask_b=covered_mask_b,
+            head_a_label_map=HEAD_A_LABEL_MAP,
+            head_b_label_map=HEAD_B_LABEL_MAP,
+        )
+
+        timing_row = TimingRow(
+            wsi_id=wsi_id,
+            num_tiles=num_tiles,
+            num_batches=num_batches,
+            elapsed_s=elapsed_s,
+            elapsed_min=elapsed_s / 60.0,
+            tiles_per_s=(num_tiles / elapsed_s) if elapsed_s > 0 else 0.0,
+            batches_per_s=(num_batches / elapsed_s) if elapsed_s > 0 else 0.0,
+        )
+
+        return SlideOutputs(
+            wsi_id=wsi_id,
+            avg_logits_a=avg_logits_a,
+            avg_logits_b=avg_logits_b.cpu(),
+            pred_a=pred_a,
+            pred_b_argmax=pred_b_argmax,
+            pred_b_safe=pred_b_safe,
+            possible_b=possible_b,
+            set_size_b=set_size_b,
+            apply_conformal_mask=apply_conformal_mask,
+            empty_conformal_set_mask=empty_conformal_set_mask,
+            multi_class_conformal_set_mask=multi_class_conformal_set_mask,
+            covered_mask_a=covered_mask_a,
+            covered_mask_b=covered_mask_b,
+            valid_fg_mask_b=valid_fg_mask_b,
+            area_stats_b=area_stats_b,
+            slide_stat_rows=slide_stat_rows,
+            timing_row=timing_row,
+            geometry=geometry,
+        )
+    finally:
+        wsi.close()
+
+
 @click.command()
 @click.option(
     "--tiles-dir",
@@ -1008,30 +1480,30 @@ def main(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device(f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu")
-    use_amp = (device.type == "cuda") and (not no_autocast)
-    amp_dtype = get_autocast_dtype(autocast_dtype)
+    runtime_cfg = build_runtime_config(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        gpu_id=gpu_id,
+        output_target_mpp=output_target_mpp,
+        no_autocast=no_autocast,
+        autocast_dtype=autocast_dtype,
+        save_pt=save_pt,
+        save_argmax_png=save_argmax_png,
+        save_safe_png=save_safe_png,
+    )
 
-    model, tile_size, conformal_cfg = load_model_and_conformal(model_dir.resolve())
-    model = model.to(device).eval()
+    model, img_size, conformal_cfg = load_model_and_conformal(model_dir.resolve())
+    model = model.to(runtime_cfg.device).eval()
 
-    num_head_b_classes = len(HEAD_B_LABEL_MAP)
     thresholds_b = get_head_b_thresholds(
         conformal_cfg=conformal_cfg,
-        num_classes=num_head_b_classes,
+        num_classes=len(HEAD_B_LABEL_MAP),
         bg_idx=0,
     )
     if thresholds_b is not None:
-        thresholds_b = thresholds_b.to(device)
+        thresholds_b = thresholds_b.to(runtime_cfg.device)
 
-    if isinstance(tile_size, int):
-        tile_size = (tile_size, tile_size)
-    elif isinstance(tile_size, (list, tuple)):
-        tile_size = tuple(tile_size)
-    else:
-        raise TypeError(f"Unsupported img_size type: {type(tile_size)}")
-
-    tile_transform = build_tile_transform(tile_size)
+    tile_transform = build_tile_transform(normalize_img_size(img_size))
 
     tiling_store = build_tiling_store_from_dir(
         slides_root=slides_dir,
@@ -1043,247 +1515,29 @@ def main(
         raise FileNotFoundError(f"No .tif slides found in {slides_dir}")
 
     for wsi_path in slide_paths:
-        wsi_id = wsi_path.stem
-        coords, _cont_idx, attrs = tiling_store.load_coords(wsi_id)
+        outputs = process_single_slide(
+            wsi_path=wsi_path,
+            tiling_store=tiling_store,
+            model=model,
+            thresholds_b=thresholds_b,
+            tile_transform=tile_transform,
+            runtime_cfg=runtime_cfg,
+        )
 
-        wsi = openslide.OpenSlide(str(wsi_path))
-        try:
-            mpp = get_mpp(wsi)
-            level0_w, level0_h = wsi.level_dimensions[0]
+        write_slide_outputs(
+            output_dir=output_dir,
+            outputs=outputs,
+            output_target_mpp=runtime_cfg.output_target_mpp,
+            save_pt=runtime_cfg.save_pt,
+            save_argmax_png=runtime_cfg.save_argmax_png,
+            save_safe_png=runtime_cfg.save_safe_png,
+        )
 
-            mask_h = int(math.ceil(level0_h * mpp / output_target_mpp))
-            mask_w = int(math.ceil(level0_w * mpp / output_target_mpp))
-
-            thumbnail = None
-            if save_argmax_png or save_safe_png:
-                thumbnail = wsi.get_thumbnail((mask_w, mask_h))
-                mask_w, mask_h = thumbnail.size
-
-            fx = level0_w / mask_w
-            fy = level0_h / mask_h
-
-            ds = TileDataset(
-                wsi=wsi,
-                coords=coords,
-                attrs=attrs,
-                transforms=tile_transform,
-            )
-            loader = DataLoader(
-                ds,
-                batch_size=batch_size,
-                shuffle=False,
-                num_workers=num_workers,
-                pin_memory=(device.type == "cuda"),
-            )
-
-            level_downsample = float(wsi.level_downsamples[ds.tile_level])
-            tile_extent0 = ds.tile_size_lvl * level_downsample
-
-            sum_map_a: Optional[torch.Tensor] = None
-            sum_map_b: Optional[torch.Tensor] = None
-            w_map_a = torch.zeros((mask_h, mask_w), dtype=torch.float32)
-            w_map_b = torch.zeros((mask_h, mask_w), dtype=torch.float32)
-
-            for tiles, xy0 in tqdm(loader, desc=f"Processing {wsi_id}"):
-                tiles = tiles.to(device, non_blocking=True)
-
-                with torch.inference_mode():
-                    if use_amp:
-                        with torch.autocast(device_type="cuda", dtype=amp_dtype):
-                            out = model(tiles)
-                    else:
-                        out = model(tiles)
-
-                required_keys = {"logits_a", "logits_b"}
-                missing = required_keys - set(out.keys())
-                if missing:
-                    raise KeyError(
-                        f"Model output missing required keys: {sorted(missing)}"
-                    )
-
-                logits_a_cpu = out["logits_a"].detach().float().cpu()
-                logits_b_cpu = out["logits_b"].detach().float().cpu()
-                xy0_cpu = xy0.cpu().tolist()
-
-                if sum_map_a is None:
-                    sum_map_a = torch.zeros(
-                        (int(logits_a_cpu.shape[1]), mask_h, mask_w),
-                        dtype=torch.float32,
-                    )
-
-                if sum_map_b is None:
-                    sum_map_b = torch.zeros(
-                        (int(logits_b_cpu.shape[1]), mask_h, mask_w),
-                        dtype=torch.float32,
-                    )
-
-                for b, (x0, y0) in enumerate(xy0_cpu):
-                    x0m, y0m, x1m, y1m = bbox_level0_to_mask_rect(
-                        x0=int(x0),
-                        y0=int(y0),
-                        extent0_w=tile_extent0,
-                        extent0_h=tile_extent0,
-                        fx=fx,
-                        fy=fy,
-                    )
-                    out_w = x1m - x0m
-                    out_h = y1m - y0m
-
-                    tile_logits_a = F.interpolate(
-                        logits_a_cpu[b : b + 1],
-                        size=(out_h, out_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    )[0]
-
-                    tile_logits_b = F.interpolate(
-                        logits_b_cpu[b : b + 1],
-                        size=(out_h, out_w),
-                        mode="bilinear",
-                        align_corners=False,
-                    )[0]
-
-                    accumulate_tile_into_canvas(
-                        sum_map=sum_map_a,
-                        w_map=w_map_a,
-                        tile_logits=tile_logits_a,
-                        x0m=x0m,
-                        y0m=y0m,
-                        x1m=x1m,
-                        y1m=y1m,
-                    )
-                    accumulate_tile_into_canvas(
-                        sum_map=sum_map_b,
-                        w_map=w_map_b,
-                        tile_logits=tile_logits_b,
-                        x0m=x0m,
-                        y0m=y0m,
-                        x1m=x1m,
-                        y1m=y1m,
-                    )
-
-            if sum_map_a is None or sum_map_b is None:
-                raise RuntimeError(f"No tiles processed for {wsi_id}.")
-
-            avg_logits_a = finalize_canvas(sum_map_a, w_map_a)
-            avg_logits_b = finalize_canvas(sum_map_b, w_map_b)
-
-            covered_mask_a = compute_covered_mask(w_map_a)
-            covered_mask_b = compute_covered_mask(w_map_b)
-
-            head_a = compute_head_a_prediction(
-                avg_logits_a=avg_logits_a,
-                covered_mask_a=covered_mask_a,
-                bg_idx=0,
-            )
-            pred_a = head_a["pred_a"]
-
-            # kept for backward compatibility in payload
-            valid_fg_mask_b = covered_mask_b & (pred_a != 0)
-
-            conformal_b = compute_conformal_head_b(
-                avg_logits_b=avg_logits_b.to(device),
-                thresholds_b=thresholds_b,
-                covered_mask_b=covered_mask_b.to(device),
-                bg_idx=0,
-            )
-
-            pred_b_argmax = conformal_b["pred_b_argmax"].cpu()
-            pred_b_safe = conformal_b["pred_b_safe"].cpu()
-            possible_b = conformal_b["possible_b"].cpu()
-            set_size_b = conformal_b["set_size_b"].cpu()
-            apply_conformal_mask = conformal_b["apply_conformal_mask"].cpu()
-            empty_conformal_set_mask = conformal_b["empty_conformal_set_mask"].cpu()
-            multi_class_conformal_set_mask = conformal_b["multi_class_conformal_set_mask"].cpu()
-
-            area_stats_b = compute_area_stats_from_safe_possible(
-                pred_b_argmax=pred_b_argmax,
-                pred_b_safe=pred_b_safe,
-                possible_b=possible_b,
-                covered_mask_b=covered_mask_b,
-                apply_conformal_mask=apply_conformal_mask,
-                set_size_b=set_size_b,
-            )
-
-            slide_stat_rows = build_slide_stats_rows(
-                wsi_id=wsi_id,
-                pred_a=pred_a,
-                pred_b_argmax=pred_b_argmax,
-                pred_b_safe=pred_b_safe,
-                possible_b=possible_b,
-                apply_conformal_mask=apply_conformal_mask,
-                set_size_b=set_size_b,
-                covered_mask_a=covered_mask_a,
-                covered_mask_b=covered_mask_b,
-                head_a_label_map=HEAD_A_LABEL_MAP,
-                head_b_label_map=HEAD_B_LABEL_MAP,
-            )
-
-            payload = {
-                "wsi_id": wsi_id,
-                "avg_logits_a": avg_logits_a,
-                "avg_logits_b": avg_logits_b.cpu(),
-                "pred_a": pred_a,
-                "pred_b_argmax": pred_b_argmax,
-                "pred_b_safe": pred_b_safe,
-                "possible_b": possible_b,
-                "max_possible_b": possible_b,
-                "set_size_b": set_size_b,
-                "apply_conformal_mask": apply_conformal_mask,
-                "empty_conformal_set_mask": empty_conformal_set_mask,
-                "multi_class_conformal_set_mask": multi_class_conformal_set_mask,
-                "covered_mask_a": covered_mask_a,
-                "covered_mask_b": covered_mask_b,
-                "valid_fg_mask_b": valid_fg_mask_b,
-                "area_stats_b": area_stats_b,
-                "mask_h": mask_h,
-                "mask_w": mask_w,
-                "level0_w": level0_w,
-                "level0_h": level0_h,
-                "fx": fx,
-                "fy": fy,
-                "output_target_mpp": float(output_target_mpp),
-                "head_a_label_map": HEAD_A_LABEL_MAP,
-                "head_b_label_map": HEAD_B_LABEL_MAP,
-            }
-
-            if save_pt:
-                out_path = output_dir / f"{wsi_id}_stitched.pt"
-                torch.save(payload, out_path)
-                print(f"[OK] {wsi_id}: stitched -> {out_path}")
-
-            if save_argmax_png:
-                save_png_mask(pred_a, output_dir / f"{wsi_id}_pred_head_a.png")
-                save_png_mask(
-                    pred_b_argmax, output_dir / f"{wsi_id}_pred_head_b_argmax.png"
-                )
-
-            if save_safe_png:
-                save_png_mask(
-                    pred_b_safe, output_dir / f"{wsi_id}_pred_head_b_safe.png"
-                )
-                save_png_mask(
-                    empty_conformal_set_mask.to(torch.uint8),
-                    output_dir / f"{wsi_id}_empty_conformal_set.png",
-                )
-                save_png_mask(
-                    multi_class_conformal_set_mask.to(torch.uint8),
-                    output_dir / f"{wsi_id}_multi_class_conformal_set.png",
-                )
-
-            if thumbnail is not None:
-                thumb_path = output_dir / f"{wsi_id}_thumbnail.png"
-                thumbnail.save(thumb_path)
-
-            stats_path = output_dir / f"{wsi_id}_area_stats_b.yaml"
-            with stats_path.open("w", encoding="utf-8") as f:
-                yaml.safe_dump(area_stats_b, f, sort_keys=False)
-
-            slide_stats_csv_path = output_dir / f"{wsi_id}_slide_stats.csv"
-            write_stat_rows_csv(slide_stats_csv_path, slide_stat_rows)
-
-        finally:
-            wsi.close()
+        print(
+            f"[OK] {outputs.wsi_id}: "
+            f"{outputs.timing_row.elapsed_s:.2f}s "
+            f"({outputs.timing_row.tiles_per_s:.2f} tiles/s)"
+        )
 
 
 if __name__ == "__main__":

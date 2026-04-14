@@ -16,7 +16,7 @@ from sklearn.metrics import (
 
 # %%
 predictions_dir = Path(
-    "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/predictions/giddy-spaceship-137"
+    "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions/fragrant-music-139"
 )
 
 dhmc_metadata_df = pd.read_csv(
