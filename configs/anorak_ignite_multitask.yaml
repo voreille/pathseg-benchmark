@@ -1,9 +1,9 @@
 trainer:
   precision: "16-mixed" # or "bf16-mixed" for uni2 or 16-mixed for h-optimus
   max_steps: 40000
-  val_check_interval: 4000
+  val_check_interval: 1000
   check_val_every_n_epoch: null
-  accumulate_grad_batches: 4
+  accumulate_grad_batches: 1
   logger:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
@@ -19,14 +19,14 @@ trainer:
           "multitask",
           "linear_decoder",
           "CustomTransforms",
-          "H-optimus-1",
+          "h0-mini",
         ]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
   class_path: pathseg.training.multitask_semantic.TwoHeadSemantic
   init_args:
-    freeze_encoder: False
+    freeze_encoder: True
     source_id_a: 0
     source_id_b: 1
     num_metrics: 2
@@ -35,7 +35,7 @@ model:
       class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
       # class_path: pathseg.models.multitask_decoder.TwoHeadsLinearARefinedBDecoder
       init_args:
-        encoder_id: "h-optimus-1"
+        encoder_id: "h0-mini"
         num_classes_a: 16
         num_classes_b: 7
     tiler:
@@ -70,7 +70,7 @@ data:
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0
-    batch_size: 4
+    batch_size: 16
     transforms:
       # class_path: pathseg.datasets.transforms.HistoTransforms
       class_path: pathseg.datasets.transforms.CustomTransforms

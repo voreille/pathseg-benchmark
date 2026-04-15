@@ -151,6 +151,7 @@ def accumulate_tile_into_canvas(
     y0m: int,
     x1m: int,
     y1m: int,
+    weight_map: torch.Tensor | None = None,
 ) -> None:
     _, h, w = sum_map.shape
 
@@ -167,8 +168,14 @@ def accumulate_tile_into_canvas(
     oy1 = oy0 + (ty1 - ty0)
 
     tile_crop = tile_logits[:, oy0:oy1, ox0:ox1]
-    sum_map[:, ty0:ty1, tx0:tx1] += tile_crop
-    w_map[ty0:ty1, tx0:tx1] += 1.0
+
+    if weight_map is None:
+        sum_map[:, ty0:ty1, tx0:tx1] += tile_crop
+        w_map[ty0:ty1, tx0:tx1] += 1.0
+    else:
+        weight_crop = weight_map[oy0:oy1, ox0:ox1]
+        sum_map[:, ty0:ty1, tx0:tx1] += tile_crop * weight_crop.unsqueeze(0)
+        w_map[ty0:ty1, tx0:tx1] += weight_crop
 
 
 def finalize_canvas(
@@ -1123,6 +1130,13 @@ def run_model_on_tiles(
         yield logits_a_cpu, logits_b_cpu, xy0.cpu()
 
 
+def make_2d_hann_window(h: int, w: int, eps: float = 1e-6) -> torch.Tensor:
+    wy = torch.hann_window(h, periodic=False, dtype=torch.float32)
+    wx = torch.hann_window(w, periodic=False, dtype=torch.float32)
+    window = wy[:, None] * wx[None, :]
+    return window.clamp_min(eps)
+
+
 def stitch_slide_logits(
     loader: DataLoader,
     model: torch.nn.Module,
@@ -1183,10 +1197,12 @@ def stitch_slide_logits(
                 align_corners=False,
             )[0]
 
+            hann_window = make_2d_hann_window(out_h, out_w)
             accumulate_tile_into_canvas(
                 sum_map=sum_map_a,
                 w_map=w_map_a,
                 tile_logits=tile_logits_a,
+                weight_map=hann_window,
                 x0m=x0m,
                 y0m=y0m,
                 x1m=x1m,
@@ -1196,6 +1212,7 @@ def stitch_slide_logits(
                 sum_map=sum_map_b,
                 w_map=w_map_b,
                 tile_logits=tile_logits_b,
+                weight_map=hann_window,
                 x0m=x0m,
                 y0m=y0m,
                 x1m=x1m,

@@ -2,7 +2,7 @@ trainer:
   callbacks:
     - class_path: pathseg.evaluation.callbacks.SaveTwoHeadEvalCallback
       init_args:
-        out_dir: /home/valentin/workspaces/pathseg-benchmark/data/evaluations/anorak_ignite/fragrant-music-139/
+        out_dir: /home/valentin/workspaces/pathseg-benchmark/data/evaluations/anorak_ignite/brisk-forest-149/
         num_classes_a: 16
         num_classes_b: 7
         ignore_idx: 255
