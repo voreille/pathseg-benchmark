@@ -17,6 +17,7 @@ from sklearn.metrics import (
 # %%
 predictions_dir = Path(
     "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions/fragrant-music-139"
+    # "/home/valentin/workspaces/pathseg-benchmark/data/wsi/DHMC/conformal_predictions/giddy-spaceship-137"
 )
 
 dhmc_metadata_df = pd.read_csv(
@@ -258,10 +259,18 @@ summary_df
 
 # %%
 plot_confusion_matrix(
-    all_cm["tumor_x_head_b_argmax"],
-    title="Normalized confusion matrix - tumor_x_head_b_argmax",
+    all_cm["head_b_argmax"],
+    title="Normalized confusion matrix - H-optimus-1",
     normalize=True,
 )
+# %%
+plot_confusion_matrix(
+    all_cm["tumor_x_head_b_argmax"],
+    title="Normalized confusion matrix - H-optimus-1 (only tumor)",
+    normalize=True,
+)
+
+
 
 # %%
 plot_confusion_matrix(
@@ -269,10 +278,3 @@ plot_confusion_matrix(
     title="Normalized confusion matrix - tumor_x_head_b_safe",
     normalize=True,
 )
-# %%
-plot_confusion_matrix(
-    all_cm["head_b_argmax"],
-    title="Normalized confusion matrix - head_b_argmax",
-    normalize=True,
-)
-# %%
