@@ -277,12 +277,22 @@ def _check_and_fix_mask_inplace(
     show_default=True,
     help="File staging mode: 'copy' keeps raw files; 'move' saves space.",
 )
+@click.option(
+    "--copy-with-context",
+    is_flag=True,
+    show_default=True,
+    help=(
+        "Also copy the matching *_with_context images and masks into "
+        "images_with_context/ and masks_semantic_with_context/."
+    ),
+)
 def main(
     raw_data_dir: Path,
     output_dir: Path,
     dataset_id: str,
     min_area: float,
     mode: str,
+    copy_with_context: bool,
 ) -> None:
     """
     Prepare the IGNITE dataset for PathSeg experiments.
@@ -308,6 +318,12 @@ def main(
     masks_dir = output_dir / "masks_semantic"
     images_dir.mkdir(exist_ok=True)
     masks_dir.mkdir(exist_ok=True)
+
+    images_with_context_dir = output_dir / "images_with_context"
+    masks_with_context_dir = output_dir / "masks_semantic_with_context"
+    if copy_with_context:
+        images_with_context_dir.mkdir(exist_ok=True)
+        masks_with_context_dir.mkdir(exist_ok=True)
 
     # Stage label map and load valid IDs from the staged copy (important for mode=move)
     src_label_map_file = raw_data_dir / f"{stain_folder}_label_map.json"
@@ -337,6 +353,8 @@ def main(
         src_img = raw_data_dir / "images" / stain_folder / img_name
         src_msk = raw_data_dir / "annotations" / stain_folder / msk_name
 
+        src_img_with_context = None
+        src_msk_with_context = None
         if not src_img.exists():
             raise FileNotFoundError(f"Missing image: {src_img}")
         if not src_msk.exists():
@@ -344,6 +362,53 @@ def main(
 
         dst_img = images_dir / img_name
         dst_msk = masks_dir / msk_name
+
+        if copy_with_context:
+            src_img_with_context = (
+                raw_data_dir / "images" / stain_folder / f"{sample_id}_with_context.png"
+            )
+            src_msk_with_context = (
+                raw_data_dir
+                / "annotations"
+                / stain_folder
+                / f"{sample_id}_with_context.png"
+            )
+
+            if not src_img_with_context.exists():
+                raise FileNotFoundError(
+                    f"Missing image with context: {src_img_with_context}"
+                )
+            if not src_msk_with_context.exists():
+                raise FileNotFoundError(
+                    f"Missing mask with context: {src_msk_with_context}"
+                )
+
+            dst_img_with_context = (
+                images_with_context_dir / f"{sample_id}_with_context.png"
+            )
+            dst_msk_with_context = (
+                masks_with_context_dir / f"{sample_id}_with_context.png"
+            )
+
+            # Stage files with context
+            stage_file(src_img_with_context, dst_img_with_context, mode=mode)
+            stage_file(src_msk_with_context, dst_msk_with_context, mode=mode)
+
+            # Validate/correct the staged mask with context in place (if needed)
+            _check_and_fix_mask_inplace(
+                dst_msk_with_context,
+                sample_id=sample_id,
+                valid_label_ids=valid_label_ids,
+            )
+
+            translate_mask(
+                dst_msk_with_context,
+                dst_msk_with_context,
+                src_label_map=src_label_map,
+                dst_label_map=DESTINATION_LABEL_MAP,
+                label_translation=LABEL_TRANSLATION,
+                mode="inplace",
+            )
 
         # Stage files
         stage_file(src_img, dst_img, mode=mode)

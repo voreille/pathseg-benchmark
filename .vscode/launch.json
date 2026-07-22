@@ -40,6 +40,7 @@
                 "/mnt/nas7/data/Personal/Valentin/IGNITE",
                 "--output-dir",
                 "${workspaceFolder}/data/fss/ignite",
+                "--copy-with-context",
             ],
             "console": "integratedTerminal",
             "env": {
