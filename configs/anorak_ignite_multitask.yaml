@@ -33,7 +33,6 @@ model:
     network:
       # class_path: pathseg.models.multitask_unetr.TwoHeadViTPyramidSeg
       class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
-      # class_path: pathseg.models.multitask_decoder.TwoHeadsLinearARefinedBDecoder
       init_args:
         encoder_id: "h0-mini"
         num_classes_a: 16
