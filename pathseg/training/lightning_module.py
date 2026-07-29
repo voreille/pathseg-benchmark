@@ -1,4 +1,4 @@
-# TODO: use a model builder for better loading flexibility 
+# TODO: use a model builder for better loading flexibility
 import io
 import math
 from typing import Optional
@@ -23,6 +23,7 @@ from pathseg.training.tiler import Tiler
 class LightningModule(lightning.LightningModule):
     def __init__(
         self,
+        *,
         img_size: tuple[int, int],
         freeze_encoder: bool,
         network: nn.Module,

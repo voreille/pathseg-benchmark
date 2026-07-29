@@ -10,12 +10,12 @@ from pathseg.models.encoder import Encoder
 class LinearDecoder(Encoder):
     def __init__(
         self,
-        encoder_id,
-        num_classes,
-        img_size,
-        sub_norm=False,
-        ckpt_path="",
-        discard_last_mlp=False,
+        encoder_id: str,
+        num_classes: int,
+        img_size: tuple[int, int],
+        sub_norm: bool = False,
+        ckpt_path: str = "",
+        discard_last_mlp: bool = False,
     ):
         super().__init__(
             encoder_id=encoder_id,
@@ -25,14 +25,22 @@ class LinearDecoder(Encoder):
             discard_last_mlp=discard_last_mlp,
         )
 
-        self.head = nn.Linear(self.embed_dim, num_classes)
+        self.head = nn.Conv2d(self.embed_dim, num_classes, kernel_size=1)
+
+    def forward_feature_maps(self, x: torch.Tensor) -> torch.Tensor:
+        return self._tokens_to_map(super().forward(x))
+
+    def _tokens_to_map(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [B, N, C] -> [B, C, H, W]
+        """
+        gh, gw = self.grid_size
+        x = x.transpose(1, 2)  # [B, C, N]
+        return x.reshape(x.shape[0], -1, gh, gw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = super().forward(x)
-        x = self.head(x)
-        x = x.transpose(1, 2)
-
-        return x.reshape(x.shape[0], -1, *self.grid_size)
+        feature_maps = self.forward_feature_maps(x)  # [B, D, H, W]
+        return self.head(feature_maps)
 
 
 class LinearDecoderBackbone(Encoder):

@@ -240,6 +240,11 @@ def _check_and_fix_mask_inplace(
     )
 
 
+def get_image_size(image_path: Path) -> Tuple[int, int]:
+    """Return (width, height) of an image file."""
+    with Image.open(image_path) as im:
+        return im.size  # (width, height)
+
 # ----------------------------
 # CLI
 # ----------------------------
@@ -343,6 +348,7 @@ def main(
 
     rows: List[Dict[str, Any]] = []
     class_rows: List[Dict[str, Any]] = []
+    rows_with_context: List[Dict[str, Any]] = []
 
     for _, r in tqdm(df.iterrows(), total=len(df)):
         sample_id = str(r["name"])
@@ -362,53 +368,6 @@ def main(
 
         dst_img = images_dir / img_name
         dst_msk = masks_dir / msk_name
-
-        if copy_with_context:
-            src_img_with_context = (
-                raw_data_dir / "images" / stain_folder / f"{sample_id}_with_context.png"
-            )
-            src_msk_with_context = (
-                raw_data_dir
-                / "annotations"
-                / stain_folder
-                / f"{sample_id}_with_context.png"
-            )
-
-            if not src_img_with_context.exists():
-                raise FileNotFoundError(
-                    f"Missing image with context: {src_img_with_context}"
-                )
-            if not src_msk_with_context.exists():
-                raise FileNotFoundError(
-                    f"Missing mask with context: {src_msk_with_context}"
-                )
-
-            dst_img_with_context = (
-                images_with_context_dir / f"{sample_id}_with_context.png"
-            )
-            dst_msk_with_context = (
-                masks_with_context_dir / f"{sample_id}_with_context.png"
-            )
-
-            # Stage files with context
-            stage_file(src_img_with_context, dst_img_with_context, mode=mode)
-            stage_file(src_msk_with_context, dst_msk_with_context, mode=mode)
-
-            # Validate/correct the staged mask with context in place (if needed)
-            _check_and_fix_mask_inplace(
-                dst_msk_with_context,
-                sample_id=sample_id,
-                valid_label_ids=valid_label_ids,
-            )
-
-            translate_mask(
-                dst_msk_with_context,
-                dst_msk_with_context,
-                src_label_map=src_label_map,
-                dst_label_map=DESTINATION_LABEL_MAP,
-                label_translation=LABEL_TRANSLATION,
-                mode="inplace",
-            )
 
         # Stage files
         stage_file(src_img, dst_img, mode=mode)
@@ -457,6 +416,80 @@ def main(
             }
         )
 
+        if copy_with_context:
+            src_img_with_context = (
+                raw_data_dir / "images" / stain_folder / f"{sample_id}_with_context.png"
+            )
+            src_msk_with_context = (
+                raw_data_dir
+                / "annotations"
+                / stain_folder
+                / f"{sample_id}_with_context.png"
+            )
+
+            if not src_img_with_context.exists():
+                raise FileNotFoundError(
+                    f"Missing image with context: {src_img_with_context}"
+                )
+            if not src_msk_with_context.exists():
+                raise FileNotFoundError(
+                    f"Missing mask with context: {src_msk_with_context}"
+                )
+
+            dst_img_with_context = (
+                images_with_context_dir / f"{sample_id}_with_context.png"
+            )
+            dst_msk_with_context = (
+                masks_with_context_dir / f"{sample_id}_with_context.png"
+            )
+
+            # Stage files with context
+            stage_file(src_img_with_context, dst_img_with_context, mode=mode)
+            stage_file(src_msk_with_context, dst_msk_with_context, mode=mode)
+
+            # Validate/correct the staged mask with context in place (if needed)
+            _check_and_fix_mask_inplace(
+                dst_msk_with_context,
+                sample_id=sample_id,
+                valid_label_ids=valid_label_ids,
+            )
+
+            translate_mask(
+                dst_msk_with_context,
+                dst_msk_with_context,
+                src_label_map=src_label_map,
+                dst_label_map=DESTINATION_LABEL_MAP,
+                label_translation=LABEL_TRANSLATION,
+                mode="inplace",
+            )
+            w_with_context, h_with_context = get_image_size(dst_img_with_context)
+
+
+            rows_with_context.append(
+                {
+                    "dataset_id": dataset_id,
+                    "sample_id": sample_id,
+                    "group": group,
+                    "image_relpath": str(Path("images_with_context") / f"{sample_id}_with_context.png"),
+                    "mask_relpath": str(Path("masks_semantic_with_context") / f"{sample_id}_with_context.png"),
+                    "annotated_width": int(w),
+                    "annotated_height": int(h),
+                    "width": int(w_with_context),
+                    "height": int(h_with_context),
+                    "mpp_x": mpp,
+                    "mpp_y": mpp,
+                    "magnification": magnification if magnification is not None else "",
+                    # Keep these if present (else empty)
+                    "split": str(r.get("split", "")),
+                    "validation_fold": str(r.get("validation_fold", "")),
+                    "patient_id": r.get("patient_id", ""),
+                    "roi_id": r.get("roi_id", ""),
+                    "source": r.get("source", ""),
+                    "scanner": r.get("scanner", ""),
+                    "histological_subtype": r.get("histological_subtype", ""),
+                }
+            )
+
         # Class -> bbox index (from corrected staged mask)
         mask = load_label_mask(dst_msk)
         mask_ids = set(int(x) for x in np.unique(mask)) - {0}
@@ -495,6 +528,12 @@ def main(
     # Write dataset manifests
     metadata = pd.DataFrame(rows)
     metadata.to_csv(output_dir / "metadata.csv", index=False)
+
+    if copy_with_context:
+        metadata_with_context = pd.DataFrame(rows_with_context)
+        metadata_with_context.to_csv(
+            output_dir / "metadata_with_context.csv", index=False
+        )
     try:
         metadata.to_parquet(output_dir / "metadata.parquet", index=False)
     except Exception:

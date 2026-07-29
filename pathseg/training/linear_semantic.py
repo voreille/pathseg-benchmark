@@ -1,32 +1,44 @@
-from typing import Optional
+from typing import Optional, Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
 
+from pathseg.models.builders import build_decoder, build_tiler
 from pathseg.training.lightning_module import LightningModule
-from pathseg.training.tiler import Tiler
 
 
 class LinearSemantic(LightningModule):
     def __init__(
         self,
-        network: nn.Module,
+        decoder_name: str,
         num_metrics: int,
         num_classes: int,
         ignore_idx: int,
         img_size: tuple[int, int],
+        decoder_init_args: dict[str, Any] | None = None,
+        tiler_name: Optional[str] = None,
+        tiler_init_args: dict[str, Any] | None = None,
         lr: float = 1e-4,
         weight_decay: float = 0.05,
         poly_lr_decay_power: float = 0.9,
         lr_multiplier_encoder: float = 0.1,
         freeze_encoder: bool = False,
-        tiler: Optional[Tiler] = None,
         class_weights: Optional[list] = None,
         interpolate_logits: bool = True,
     ):
+        network = build_decoder(
+            decoder_name=decoder_name,
+            decoder_init_args=decoder_init_args,
+            num_classes=num_classes,
+            img_size=img_size,
+        )
+
+        tiler = build_tiler(
+            tiler_name=tiler_name,
+            tiler_init_args=tiler_init_args,
+        )
         super().__init__(
             img_size=img_size,
             freeze_encoder=freeze_encoder,
@@ -38,7 +50,7 @@ class LinearSemantic(LightningModule):
         )
 
         self.interpolate_logits = interpolate_logits
-        self.save_hyperparameters(ignore=["network"])
+        self.save_hyperparameters()
 
         self.ignore_idx = ignore_idx
         self.poly_lr_decay_power = poly_lr_decay_power

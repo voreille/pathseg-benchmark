@@ -7,10 +7,7 @@ from lightning.pytorch.utilities import rank_zero_info
 from torch import nn
 from torch.utils.data import DataLoader
 
-from pathseg.datasets.dataset import (
-    Dataset,
-    PredictDataset,
-)
+from pathseg.datasets.dataset import Dataset
 from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.datasets.transforms import CustomTransforms
 from pathseg.datasets.utils import RepeatDataset
@@ -138,7 +135,7 @@ class IGNITE(LightningDataModule):
 
         if stage in ("predict", None):
             # self.val_dataset = PredictDataset(val_ids, self.images_dir, self.masks_dir)
-            self.test_dataset = PredictDataset(
+            self.test_dataset = Dataset(
                 test_ids,
                 self.images_dir,
                 self.masks_dir,

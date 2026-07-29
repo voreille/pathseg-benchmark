@@ -203,7 +203,10 @@ def _inject_resume_args(argv: list[str]) -> list[str]:
     cleaned = _remove_flag_and_value(cleaned, "--resume_run_id")
 
     # Only inject if user did not already specify them
-    if _extract_cli_value(cleaned, "--config") is None and _extract_cli_value(cleaned, "-c") is None:
+    if (
+        _extract_cli_value(cleaned, "--config") is None
+        and _extract_cli_value(cleaned, "-c") is None
+    ):
         cleaned.extend(["--config", str(config_path)])
 
     if _extract_cli_value(cleaned, "--ckpt_path") is None:
@@ -270,10 +273,6 @@ class LightningCLI(cli.LightningCLI):
             "model.init_args.num_classes",
         )
         parser.link_arguments(
-            "data.init_args.num_classes",
-            "model.init_args.network.init_args.num_classes",
-        )
-        parser.link_arguments(
             "data.init_args.num_metrics",
             "model.init_args.num_metrics",
         )
@@ -284,10 +283,6 @@ class LightningCLI(cli.LightningCLI):
         parser.link_arguments(
             "data.init_args.img_size",
             "model.init_args.img_size",
-        )
-        parser.link_arguments(
-            "data.init_args.img_size",
-            "model.init_args.network.init_args.img_size",
         )
 
     def fit(self, model, **kwargs) -> None:

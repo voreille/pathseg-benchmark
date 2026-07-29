@@ -123,7 +123,6 @@
             },
             "justMyCode": false
         },
- 
         {
             "name": "Python: main.py predict ANORAK+IGNITE Prototype MultiTask Semantic",
             "type": "debugpy",
@@ -425,6 +424,80 @@
                 "--save-argmax-png",
                 "--num-workers",
                 "16",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python: Fit PCA on IGNITE training set for OOD",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/fit_ood_pca.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--checkpoint",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/6ehs0ufj/epoch=99-step=40000.ckpt",
+                "--metadata",
+                "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite/metadata_with_context.csv",
+                "--data-root",
+                "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite",
+                "--output-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0",
+                "--tiles-per-patient",
+                "50",
+                "--batch-size",
+                "32",
+                "--num-workers",
+                "8",
+                "--max-plot-components",
+                "768",
+                "--mle-max-components",
+                "768",
+            ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python: Generate HistoPath-C images",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/generate_histopathc_images.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--data-root",
+                "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite",
+                "--data-overview-csv",
+                "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite/metadata.csv",
+                "--output-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite"
+           ],
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
+        },
+        {
+            "name": "Python:  Compute PCA residual score",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/score_residual_pca_maps.py",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": [
+                "--pca",
+                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0/pca.pt",
+                "--input-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite/artifact_images",
+                "--output-dir",
+                "outputs/ood_maps_corrupted_n_pca_256/mahalanobis",
+                "--n-major-components",
+                "256",
+                "--score-type",
+                "mahalanobis"
+
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
