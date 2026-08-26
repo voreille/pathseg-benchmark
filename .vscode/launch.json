@@ -444,9 +444,9 @@
                 "--data-root",
                 "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0",
+                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0_l2normalized",
                 "--tiles-per-patient",
-                "50",
+                "100",
                 "--batch-size",
                 "32",
                 "--num-workers",
@@ -455,25 +455,28 @@
                 "768",
                 "--mle-max-components",
                 "768",
+                "--normalize-embeddings",
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
         },
         {
-            "name": "Python: Generate HistoPath-C images",
+            "name": "Python: Generate Artifact dataset",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/scripts/generate_histopathc_images.py",
+            "program": "${workspaceFolder}/scripts/generate_artifact_dataset.py",
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
                 "--data-root",
                 "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite",
-                "--data-overview-csv",
+                "--metadata-csv",
                 "/home/valentin/workspaces/pathseg-benchmark/data/fss/ignite/metadata.csv",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite"
+                "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite",
+                "--corruption-type",
+                "tissue_fold",
            ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -488,15 +491,15 @@
             "justMyCode": false,
             "args": [
                 "--pca",
-                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0/pca.pt",
+                "/home/valentin/workspaces/pathseg-benchmark/outputs/pca_ood/h0_mini_fold0_l2normalized/pca.pt",
                 "--input-dir",
                 "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite/artifact_images",
                 "--output-dir",
-                "outputs/ood_maps_corrupted_n_pca_256/mahalanobis",
+                "outputs/ood_maps_corrupted_n_pca_256_l2normalized/euclidean",
                 "--n-major-components",
                 "256",
-                "--score-type",
-                "mahalanobis"
+                // "--score-type",
+                // "mahalanobis"
 
             ],
             "env": {

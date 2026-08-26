@@ -205,45 +205,214 @@ Additional dataset-specific columns are allowed and ignored by default.
 Dataset download is **optional** and depends on which benchmarks you plan to run.
 
 ---
-
 ### 2. Environment setup
 
-```
-conda create -n pathseg-benchmark python=3.10 -y
-conda activate pathseg-benchmark
+PathSeg is tested with Python 3.12.
 
-python -m pip install --upgrade pip
+Create and activate a dedicated Conda environment:
+
+```bash
+conda create -n pathseg-benchmark python=3.12 pip -y
+conda activate pathseg-benchmark
+```
+
+Upgrade the packaging tools:
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
 ```
 
 ---
 
 ### 3. Install PyTorch
 
-```
-pip install torch==2.2.2 torchvision==0.17.2 \
-  --extra-index-url https://download.pytorch.org/whl/cu123
+Install PyTorch 2.13.0 and TorchVision 0.28.0 with the CUDA 12.6 runtime:
+
+```bash
+python -m pip install \
+  torch==2.13.0 \
+  torchvision==0.28.0 \
+  --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Replace `cu123` with your CUDA version (e.g. `cu121`, `cu118`).
+The CUDA runtime bundled with PyTorch does not have to match the CUDA version displayed by `nvidia-smi` exactly. The NVIDIA driver must support the selected runtime.
 
 ---
 
-### 4. Install this repository
+### 4. Install Faiss GPU
 
-Editable install:
+Install the CUDA 12 Faiss wheel:
 
+```bash
+python -m pip install \
+  faiss-gpu-cu12==1.14.1.post1
 ```
-pip install -e ".[parquet]"
+
+Install PyTorch before Faiss so that both packages resolve against a compatible CUDA 12.x runtime.
+
+Do not use the `fix-cuda` extra here:
+
+```text
+faiss-gpu-cu12[fix-cuda]
 ```
 
-Development install:
+That extra fixes the Faiss CUDA dependencies to CUDA 12.1, whereas this environment uses the CUDA 12.6 libraries installed with PyTorch.
 
+Do not install multiple Faiss distributions in the same environment. In particular, avoid combining `faiss-gpu-cu12` with:
+
+```text
+faiss-gpu
+faiss-gpu-cuvs
+faiss-cpu
 ```
-pip install -e ".[dev,parquet]"
+
+The `faiss-gpu-cu12` package is a third-party GPU wheel. The upstream Faiss project officially supports its Conda packages, but the available Conda builds may not resolve cleanly for every Python and CUDA combination.
+
+---
+
+### 5. Install PathSeg
+
+Move to the repository directory:
+
+```bash
+cd /path/to/pathseg
+```
+
+Install PathSeg with Parquet support:
+
+```bash
+python -m pip install -e ".[parquet]"
+```
+
+For development:
+
+```bash
+python -m pip install -e ".[dev,parquet]"
+```
+
+Verify that the installed package requirements are consistent:
+
+```bash
+python -m pip check
 ```
 
 ---
 
+### 6. Verify the GPU environment
+
+```bash
+python - <<'PY'
+import torch
+import torchvision
+import faiss
+import numpy as np
+
+print("PyTorch:", torch.__version__)
+print("TorchVision:", torchvision.__version__)
+print("PyTorch CUDA runtime:", torch.version.cuda)
+print("PyTorch CUDA available:", torch.cuda.is_available())
+print("PyTorch GPU count:", torch.cuda.device_count())
+
+print("Faiss:", faiss.__version__)
+print("Faiss GPU count:", faiss.get_num_gpus())
+
+print("NumPy:", np.__version__)
+PY
+```
+
+On a working GPU installation, the output should be similar to:
+
+```text
+PyTorch: 2.13.0+cu126
+TorchVision: 0.28.0+cu126
+PyTorch CUDA runtime: 12.6
+PyTorch CUDA available: True
+PyTorch GPU count: 2
+Faiss: 1.14.1
+Faiss GPU count: 2
+```
+
+The number of visible GPUs depends on the machine and any `CUDA_VISIBLE_DEVICES` setting.
+
+---
+
+### 7. Test Faiss on the GPU
+
+Run a small end-to-end nearest-neighbour search:
+
+```bash
+python - <<'PY'
+import faiss
+import numpy as np
+
+dimension = 128
+num_vectors = 10_000
+num_queries = 10
+k = 5
+
+rng = np.random.default_rng(42)
+
+database = rng.random(
+    (num_vectors, dimension),
+    dtype=np.float32,
+)
+
+queries = rng.random(
+    (num_queries, dimension),
+    dtype=np.float32,
+)
+
+resources = faiss.StandardGpuResources()
+
+cpu_index = faiss.IndexFlatL2(dimension)
+gpu_index = faiss.index_cpu_to_gpu(
+    resources,
+    0,
+    cpu_index,
+)
+
+gpu_index.add(database)
+distances, indices = gpu_index.search(queries, k)
+
+print("Indexed vectors:", gpu_index.ntotal)
+print("Result shape:", indices.shape)
+print("First query neighbours:", indices[0])
+print("First query distances:", distances[0])
+PY
+```
+
+The expected result shape is:
+
+```text
+(10, 5)
+```
+
+---
+
+### CPU-only installation
+
+For a CPU-only environment, install PyTorch and Faiss from their CPU wheel indexes instead:
+
+```bash
+python -m pip install \
+  torch==2.13.0 \
+  torchvision==0.28.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+```
+
+```bash
+python -m pip install "faiss-cpu>=1.14,<1.15"
+```
+
+Then install PathSeg normally:
+
+```bash
+python -m pip install -e ".[dev,parquet]"
+```
+
+
+
+---
 ### 5. Prepare a dataset (example: IGNITE)
 
 ```
