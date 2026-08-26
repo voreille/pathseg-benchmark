@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 from PIL import Image
 from torch.nn.functional import interpolate
 from torch.optim import AdamW
-from torchmetrics.classification import MulticlassJaccardIndex, MulticlassF1Score
+from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 from torchvision.transforms.v2.functional import resize
 
 from pathseg.training.tiler import Tiler
@@ -40,18 +40,27 @@ class LightningModule(lightning.LightningModule):
         self.weight_decay = weight_decay
         self.lr_multiplier_encoder = lr_multiplier_encoder
 
-        if hasattr(self.network, "encoder") and freeze_encoder:
-            for param in self.network.encoder.parameters():
-                param.requires_grad = False
+        if self.freeze_encoder:
+            if not hasattr(self.network, "encoder"):
+                raise ValueError(
+                    "Cannot freeze encoder: network has no attribute 'encoder'."
+                )
 
+            self.network.encoder.requires_grad_(False)
             self.network.encoder.eval()
-        elif freeze_encoder:
-            raise ValueError(
-                "Cannot freeze encoder: the network has no attribute 'encoder'."
-            )
 
         self.log = torch.compiler.disable(self.log)  # type: ignore
         self.tiler = tiler
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+
+        if self.freeze_encoder:
+            # Prevent Lightning/module.train() from re-enabling dropout,
+            # stochastic depth, etc. in the frozen ViT.
+            self.network.encoder.eval()
+
+        return self
 
     def init_metrics_semantic(self, num_classes, ignore_idx, num_metrics):
         self.iou_metrics = nn.ModuleList(

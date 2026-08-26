@@ -71,7 +71,7 @@ class Uni2EncoderSimple(nn.Module):
         return x
 
 
-def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
+def build_encoder(encoder_id: str, random_weights: bool) -> tuple[nn.Module, dict]:
     if encoder_id == "uni2":
         timm_kwargs = {
             "model_name": "hf-hub:MahmoodLab/UNI2-h",
@@ -112,7 +112,7 @@ def build_encoder(encoder_id: str) -> tuple[nn.Module, dict]:
     elif encoder_id == "h0-mini":
         encoder = timm.create_model(
             "hf-hub:bioptimus/H0-mini",
-            pretrained=True,
+            pretrained=not random_weights,
             mlp_layer=timm.layers.SwiGLUPacked,
             act_layer=torch.nn.SiLU,
             dynamic_img_size=True,  # keep this so your hooks work on 448
@@ -154,10 +154,11 @@ class Encoder(nn.Module):
         sub_norm: bool = False,
         discard_last_mlp: bool = False,
         discard_last_block: bool = False,
+        random_weights: bool = False,
     ):
         super().__init__()
 
-        self.encoder, encoder_meta = build_encoder(encoder_id)
+        self.encoder, encoder_meta = build_encoder(encoder_id, random_weights)
         patch_size = encoder_meta["patch_size"]
 
         pixel_mean = torch.tensor(encoder_meta["pixel_mean"]).reshape(1, -1, 1, 1)

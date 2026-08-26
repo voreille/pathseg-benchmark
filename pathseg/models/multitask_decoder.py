@@ -27,6 +27,7 @@ class ConditionalLinearDecoder(Encoder):
         sub_norm: bool = False,
         ckpt_path: str = "",
         discard_last_mlp: bool = False,
+        random_weights: bool = False,
     ):
         super().__init__(
             encoder_id=encoder_id,
@@ -34,6 +35,7 @@ class ConditionalLinearDecoder(Encoder):
             sub_norm=sub_norm,
             ckpt_path=ckpt_path,
             discard_last_mlp=discard_last_mlp,
+            random_weights=random_weights,
         )
 
         assert cond_from in {"probs", "logits"}, "cond_from must be 'probs' or 'logits'"
@@ -113,6 +115,7 @@ class TwoHeadsLinearDecoder(Encoder):
         sub_norm: bool = False,
         ckpt_path: str = "",
         discard_last_mlp: bool = False,
+        random_weights: bool = False,
     ):
         super().__init__(
             encoder_id=encoder_id,
@@ -120,6 +123,7 @@ class TwoHeadsLinearDecoder(Encoder):
             sub_norm=sub_norm,
             ckpt_path=ckpt_path,
             discard_last_mlp=discard_last_mlp,
+            random_weights=random_weights,
         )
 
         self.num_classes_a = num_classes_a
