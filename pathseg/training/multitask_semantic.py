@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import io
-from typing import Optional, Sequence, Union
+from typing import Any, Optional, Sequence, Union
 
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
@@ -14,9 +14,10 @@ from PIL import Image
 from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
+from pathseg.models.builders import build_tiler, build_two_tasks_decoder
+from pathseg.training.histo_loss import CrossEntropyDiceLoss
 from pathseg.training.lightning_module import LightningModule
 from pathseg.training.tiler import Tiler
-from pathseg.training.histo_loss import CrossEntropyDiceLoss
 
 
 class TwoHeadSemantic(LightningModule):
@@ -34,12 +35,17 @@ class TwoHeadSemantic(LightningModule):
 
     def __init__(
         self,
-        network: nn.Module,
+        decoder_name: str,
         num_metrics: int,
+        num_classes_a: int,
+        num_classes_b: int,
         source_id_a: int,
         source_id_b: int,
         ignore_idx: int,
         img_size: tuple[int, int],
+        decoder_init_args: dict[str, Any] | None = None,
+        tiler_name: Optional[str] = None,
+        tiler_init_args: dict[str, Any] | None = None,
         lr: float = 1e-4,
         weight_decay: float = 0.05,
         poly_lr_decay_power: float = 0.9,
@@ -51,6 +57,19 @@ class TwoHeadSemantic(LightningModule):
         loss_weight_a: float = 1.0,
         loss_weight_b: float = 1.0,
     ):
+        network = build_two_tasks_decoder(
+            decoder_name=decoder_name,
+            decoder_init_args=decoder_init_args,
+            num_classes_a=num_classes_a,
+            num_classes_b=num_classes_b,
+            img_size=img_size,
+        )
+
+        tiler = build_tiler(
+            tiler_name=tiler_name,
+            tiler_init_args=tiler_init_args,
+        )
+
         super().__init__(
             img_size=img_size,
             freeze_encoder=freeze_encoder,
@@ -60,7 +79,7 @@ class TwoHeadSemantic(LightningModule):
             lr_multiplier_encoder=lr_multiplier_encoder,
             tiler=tiler,
         )
-        self.save_hyperparameters(ignore=["network"])
+        self.save_hyperparameters()
 
         self.ignore_idx = int(ignore_idx)
         self.poly_lr_decay_power = float(poly_lr_decay_power)
@@ -71,8 +90,6 @@ class TwoHeadSemantic(LightningModule):
         self.loss_weight_a = float(loss_weight_a)
         self.loss_weight_b = float(loss_weight_b)
 
-        self.num_classes_a = network.num_classes_a
-        self.num_classes_b = network.num_classes_b
         self.init_metrics_semantic(
             [self.num_classes_a, self.num_classes_b], self.ignore_idx, num_metrics
         )

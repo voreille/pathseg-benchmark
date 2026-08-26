@@ -8,6 +8,31 @@ from pathseg.models.linear_decoder import LinearDecoder
 from pathseg.training.tiler import GridPadTiler, Tiler
 
 
+def build_two_tasks_decoder(
+    decoder_name: str,
+    *,
+    num_classes_a: int,
+    num_classes_b: int,
+    img_size: tuple[int, int],
+    decoder_init_args: dict[str, Any] | None = None,
+) -> nn.Module:
+    init_args = dict(decoder_init_args or {})
+
+    if decoder_name == "two_tasks_linear_decoder":
+        from pathseg.models.multitask_decoder import TwoHeadsLinearDecoder
+
+        return TwoHeadsLinearDecoder(
+            num_classes_a=num_classes_a,
+            num_classes_b=num_classes_b,
+            img_size=img_size,
+            **init_args,
+        )
+
+    raise ValueError(
+        f"Unknown decoder_name={decoder_name!r}. Available decoders: linear."
+    )
+
+
 def build_decoder(
     decoder_name: str,
     *,
@@ -23,7 +48,6 @@ def build_decoder(
             img_size=img_size,
             **init_args,
         )
-
     raise ValueError(
         f"Unknown decoder_name={decoder_name!r}. Available decoders: linear."
     )
