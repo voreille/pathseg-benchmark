@@ -39,6 +39,7 @@ class LightningModule(lightning.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.lr_multiplier_encoder = lr_multiplier_encoder
+        self.freeze_encoder = freeze_encoder
 
         if self.freeze_encoder:
             if not hasattr(self.network, "encoder"):

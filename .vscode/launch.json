@@ -504,6 +504,27 @@
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
+        },
+        {
+            "name": "Python:  Fit SAE IGNITE+ANORAK",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/anorak_ignite_sae.yaml",
+                "--no_compile",
+                "--trainer.logger=false"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
         }
     ]
 }

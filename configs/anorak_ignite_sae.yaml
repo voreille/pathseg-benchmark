@@ -17,24 +17,32 @@ trainer:
           "896x896",
           "ANORAK+IGNITE",
           "multitask",
-          "linear_decoder",
           "CustomTransforms",
           "h0-mini",
+          "SAE"
         ]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
+
 model:
   class_path: pathseg.sae.topk_sae_lightning.TopKSAETraining
   init_args:
-    freeze_encoder: True
-    decoder_name: linear_decoder
-    decoder_init_args:
-      encoder_id: h0-mini
+    encoder_id: h0-mini
+    num_latents: 3072
+    k: 32
+    img_size: [896, 896]
+    normalize_decoder: true
+    freeze_encoder: true
+
+    lr: 0.0003
+    weight_decay: 0.0
+    poly_lr_decay_power: 0.9
+    lr_multiplier_encoder: 0.1
 
     tiler_name: grid_pad_tiler
     tiler_init_args:
-      tile: 448
-      stride: 224
+      tile: 896
+      stride: 448
       weighted_blend: true
       pad_mode: replicate
       pad_value: 0.0
