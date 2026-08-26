@@ -11,8 +11,8 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-            },
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python Debugger: Prepare BCSS from TIGER",
@@ -23,12 +23,12 @@
                 "--raw-data-dir",
                 "/mnt/nas7/data/Personal/Valentin/aws_downloads/tiger-training/wsirois/roi-level-annotations/tissue-bcss",
                 "--output-dir",
-                "${workspaceFolder}/data/fss/bcss",
+                "${workspaceFolder}/data/fss/bcss"
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-            },
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python Debugger: Prepare IGNITE",
@@ -40,12 +40,12 @@
                 "/mnt/nas7/data/Personal/Valentin/IGNITE",
                 "--output-dir",
                 "${workspaceFolder}/data/fss/ignite",
-                "--copy-with-context",
+                "--copy-with-context"
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-            },
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python Debugger: Prepare ANORAK",
@@ -56,12 +56,12 @@
                 "--raw-data-dir",
                 "/mnt/nas7/data/Personal/Valentin/ANORAK_not_resized",
                 "--output-dir",
-                "${workspaceFolder}/data/fss/anorak",
+                "${workspaceFolder}/data/fss/anorak"
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-            },
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python Debugger: Prepare ANORAK Mask2Former",
@@ -69,12 +69,12 @@
             "request": "launch",
             "program": "${workspaceFolder}/pathseg/preprocessing/anorak/prepare_mask2former.py",
             "args": [
-                "${workspaceFolder}/data/fss/anorak",
+                "${workspaceFolder}/data/fss/anorak"
             ],
             "console": "integratedTerminal",
             "env": {
-                "PYTHONPATH": "${workspaceFolder}",
-            },
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python: main.py fit ANORAK+IGNITE Prototype MultiTask Semantic",
@@ -86,7 +86,7 @@
                 "-c",
                 "configs/anorak_ignite_protomultitask.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -111,8 +111,8 @@
                 "configs/eval/anorak_ignite_multitask.yaml",
                 "--no_compile",
                 "--ckpt_path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/nktrot62/epoch=26-step=40000.ckpt",
-                // "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/94nr99wz/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/nktrot62/epoch=26-step=40000.ckpt"
+                // "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/94nr99wz/epoch=26-step=40000.ckpt"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -137,7 +137,7 @@
                 "configs/eval/lunghist700.yaml",
                 "--no_compile",
                 "--ckpt_path",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/4su3gsjh/epoch=26-step=40000.ckpt",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/4su3gsjh/epoch=26-step=40000.ckpt"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -159,7 +159,7 @@
                 "configs/anorak_ignite_multitask.yaml",
                 "--no_compile",
                 "--trainer.logger=false",
-                "--data.init_args.fold=0",
+                "--data.init_args.fold=0"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -179,8 +179,8 @@
                 "fit",
                 "-c",
                 "configs/anorak_conv_semantic.yaml",
-                "--no_compile",
-                // "--trainer.logger=false",
+                "--no_compile"
+                // "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -200,8 +200,8 @@
                 "fit",
                 "-c",
                 "configs/anorak_linear_semantic.yaml",
-                "--no_compile",
-                // "--trainer.logger=false",
+                "--no_compile"
+                // "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -221,7 +221,7 @@
                 "predict",
                 "-c",
                 "configs/anorak_linear_semantic_viz.yaml",
-                "--no_compile",
+                "--no_compile"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -242,7 +242,7 @@
                 "-c",
                 "configs/anorak_mask2former.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -263,7 +263,7 @@
                 "-c",
                 "configs/anorak_concept_semantic.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -284,7 +284,7 @@
                 "-c",
                 "configs/ignite_linear_semantic.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -305,7 +305,7 @@
                 "-c",
                 "configs/ignite_mask2former.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -362,7 +362,7 @@
                 "--ckpt-path",
                 "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/bag9957e/epoch=26-step=40000.ckpt",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126/",
+                "/home/valentin/workspaces/pathseg-benchmark/models/winter-waterfall-126/"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -389,8 +389,8 @@
                 "/home/valentin/workspaces/pathseg-benchmark/models/fragrant-music-139/",
                 // "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137/",
                 "--calibration-config-path",
-                "/home/valentin/workspaces/pathseg-benchmark/models/fragrant-music-139/calibration_config.yaml",
-                // "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137/calibration_config.yaml",
+                "/home/valentin/workspaces/pathseg-benchmark/models/fragrant-music-139/calibration_config.yaml"
+                // "/home/valentin/workspaces/pathseg-benchmark/models/giddy-spaceship-137/calibration_config.yaml"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -423,7 +423,7 @@
                 "1",
                 "--save-argmax-png",
                 "--num-workers",
-                "16",
+                "16"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -455,7 +455,7 @@
                 "768",
                 "--mle-max-components",
                 "768",
-                "--normalize-embeddings",
+                "--normalize-embeddings"
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -476,7 +476,7 @@
                 "--output-dir",
                 "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite",
                 "--corruption-type",
-                "tissue_fold",
+                "tissue_fold"
            ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
@@ -497,15 +497,13 @@
                 "--output-dir",
                 "outputs/ood_maps_corrupted_n_pca_256_l2normalized/euclidean",
                 "--n-major-components",
-                "256",
-                // "--score-type",
+                "256"
+                // "--score-type"
                 // "mahalanobis"
-
             ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
-        },
- 
+        }
     ]
 }
