@@ -28,6 +28,7 @@ model:
   class_path: pathseg.sae.topk_sae_lightning.TopKSAETraining
   init_args:
     encoder_id: h0-mini
+    encoder_init_checkpoint_path: /home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/nktrot62/epoch=26-step=40000.ckpt
     num_latents: 3072
     k: 32
     img_size: [896, 896]

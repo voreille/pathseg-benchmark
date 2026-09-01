@@ -64,6 +64,8 @@ class TwoHeadSemantic(LightningModule):
             num_classes_b=num_classes_b,
             img_size=img_size,
         )
+        self.num_classes_a = num_classes_a
+        self.num_classes_b = num_classes_b
 
         tiler = build_tiler(
             tiler_name=tiler_name,

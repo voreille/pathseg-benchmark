@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional
 
 import torch
@@ -5,8 +6,11 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import PolynomialLR
 
 from pathseg.models.builders import build_tiler
+from pathseg.models.checkpoints import load_checkpoint_submodule
 from pathseg.sae.encoder import EncoderWithTopKSAE
 from pathseg.training.lightning_module import LightningModule
+
+logger = logging.getLogger(__name__)
 
 
 class TopKSAETraining(LightningModule):
@@ -18,6 +22,8 @@ class TopKSAETraining(LightningModule):
         img_size: tuple[int, int],
         sub_norm: bool = False,
         ckpt_path: str = "",
+        encoder_init_checkpoint_path: str | None = None,
+        encoder_init_checkpoint_prefix: str = "network.encoder",
         discard_last_mlp: bool = False,
         tiler_name: Optional[str] = None,
         tiler_init_args: dict[str, Any] | None = None,
@@ -29,6 +35,11 @@ class TopKSAETraining(LightningModule):
         interpolate_latents: bool = False,
         normalize_decoder: bool = True,
     ):
+        if not freeze_encoder:
+            logger.warning(
+                "freeze_encoder=False is not recommended for TopKSAE training."
+            )
+
         network = EncoderWithTopKSAE(
             encoder_id=encoder_id,
             num_latents=num_latents,
@@ -38,6 +49,14 @@ class TopKSAETraining(LightningModule):
             ckpt_path=ckpt_path,
             discard_last_mlp=discard_last_mlp,
         )
+        if encoder_init_checkpoint_path is not None:
+            load_checkpoint_submodule(
+                network.encoder,
+                encoder_init_checkpoint_path,
+                source_prefix=encoder_init_checkpoint_prefix,
+                strict=True,
+            )
+
         tiler = build_tiler(
             tiler_name=tiler_name,
             tiler_init_args=tiler_init_args,
@@ -61,7 +80,11 @@ class TopKSAETraining(LightningModule):
         self.interpolate_latents = interpolate_latents
         self.poly_lr_decay_power = poly_lr_decay_power
         self.normalize_decoder = normalize_decoder
-        self.save_hyperparameters()
+        self.save_hyperparameters(
+            ignore=[
+                "encoder_init_checkpoint_path",
+            ]
+        )
 
     def training_step(self, batch, batch_idx):
         imgs, _, _, _ = batch
@@ -195,4 +218,9 @@ class TopKSAETraining(LightningModule):
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_output = self(crops)
 
-        return crop_output["tokens"], crop_output["reconstructed_tokens"], crop_output["latents"], img_ids
+        return (
+            crop_output["tokens"],
+            crop_output["reconstructed_tokens"],
+            crop_output["latents"],
+            img_ids,
+        )

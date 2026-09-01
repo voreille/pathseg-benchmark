@@ -10,41 +10,27 @@ trainer:
       project: "pathseg-benchmark"
       group: ANORAK
       job_type: baseline
-      tags:
-        [
-          "baseline",
-          "20x",
-          "896x896",
-          "ANORAK+IGNITE",
-          "multitask",
-          "linear_decoder",
-          "CustomTransforms",
-          "h0-mini",
-        ]
+      tags: ["baseline", "20x", "896x896", "ANORAK+IGNITE", "multitask", "linear_decoder", "CustomTransforms", "h0-mini"]
       save_dir: ./wandb
       log_model: false # avoid artifact uploads in debug
 model:
   class_path: pathseg.training.multitask_semantic.TwoHeadSemantic
   init_args:
-    freeze_encoder: True
+    num_classes_a: 16
+    num_classes_b: 7
     source_id_a: 0
     source_id_b: 1
-    num_metrics: 2
-    network:
-      # class_path: pathseg.models.multitask_unetr.TwoHeadViTPyramidSeg
-      class_path: pathseg.models.multitask_decoder.TwoHeadsLinearDecoder
-      init_args:
-        encoder_id: "h0-mini"
-        num_classes_a: 16
-        num_classes_b: 7
-    tiler:
-      class_path: pathseg.training.tiler.GridPadTiler
-      init_args:
-        tile: 896
-        stride: 448
-        weighted_blend: true # or true
-        pad_mode: "replicate" # optional; nice for images
-        pad_value: 0.0
+    freeze_encoder: false
+    decoder_name: two_tasks_linear_decoder
+    decoder_init_args:
+      encoder_id: h0-mini
+    tiler_name: grid_pad_tiler
+    tiler_init_args:
+      tile: 896
+      stride: 448
+      weighted_blend: true
+      pad_mode: replicate
+      pad_value: 0.0
 data:
   class_path: pathseg.datasets.multitask.MultiTaskConcatDataModule
   init_args:

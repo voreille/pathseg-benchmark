@@ -1,11 +1,12 @@
 from typing import Optional
+
 import timm
 import torch
 import torch.nn as nn
 from timm.layers import (
-    resample_patch_embed,
     resample_abs_pos_embed,
     resample_abs_pos_embed_nhwc,
+    resample_patch_embed,
 )
 from torch.nn.functional import interpolate
 
@@ -169,7 +170,7 @@ class Encoder(nn.Module):
 
         self.grid_size = tuple(round(size / patch_size) for size in img_size)
 
-        self.embed_dim = (
+        self.embed_dim = int(
             self.encoder.embed_dim
             if hasattr(self.encoder, "embed_dim")
             else self.encoder.num_features
