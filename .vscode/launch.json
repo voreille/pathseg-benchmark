@@ -553,6 +553,7 @@
                 "fit",
                 "-c",
                 "configs/semantic_two_heads.yaml",
+                // "configs/semantic_one_head.yaml",
                 "--no_compile",
                 "--trainer.logger=false"
             ],

@@ -92,14 +92,14 @@ def _autocast_context(device: torch.device, precision: str):
     )
 
 
-def _forward_sae(
+def _forward_sae_output(
     segmenter: nn.Module,
     images: torch.Tensor,
     *,
     device: torch.device,
     precision: str,
     input_scale: float,
-) -> tuple[torch.Tensor, tuple[int, int]]:
+) -> Mapping[str, Any]:
     forward_sae = getattr(segmenter, "forward_sae", None)
     if not callable(forward_sae):
         raise TypeError("segmenter must expose forward_sae(images).")
@@ -108,12 +108,42 @@ def _forward_sae(
         output = forward_sae(images * input_scale)
     if not isinstance(output, Mapping):
         raise TypeError("forward_sae must return a mapping.")
-    if "latents" not in output or "feature_maps" not in output:
-        raise KeyError("forward_sae output must contain latents and feature_maps.")
+    required = {"latents", "reconstructed_tokens", "feature_maps"}
+    missing = required.difference(output)
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise KeyError(f"forward_sae output is missing: {names}.")
 
     feature_maps = output["feature_maps"]
     if not isinstance(feature_maps, Sequence) or not feature_maps:
         raise TypeError("feature_maps must be a non-empty sequence.")
+    latents = output["latents"]
+    reconstructed_tokens = output["reconstructed_tokens"]
+    if not torch.is_tensor(latents) or latents.ndim != 3:
+        raise TypeError("latents must be a [B,N,L] tensor.")
+    if not torch.is_tensor(reconstructed_tokens) or reconstructed_tokens.ndim != 3:
+        raise TypeError("reconstructed_tokens must be a [B,N,D] tensor.")
+    if latents.shape[:2] != reconstructed_tokens.shape[:2]:
+        raise ValueError("Latent and reconstructed token grids do not match.")
+    return output
+
+
+def _forward_sae(
+    segmenter: nn.Module,
+    images: torch.Tensor,
+    *,
+    device: torch.device,
+    precision: str,
+    input_scale: float,
+) -> tuple[torch.Tensor, tuple[int, int]]:
+    output = _forward_sae_output(
+        segmenter,
+        images,
+        device=device,
+        precision=precision,
+        input_scale=input_scale,
+    )
+    feature_maps = output["feature_maps"]
     spatial_size = tuple(int(value) for value in feature_maps[-1].shape[-2:])
     return output["latents"], spatial_size
 

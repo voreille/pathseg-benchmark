@@ -29,7 +29,6 @@ class SemanticTraining(SemanticLightningModule):
         encoder_class_path: str,
         decoder_name: str,
         tasks: list[dict[str, Any]],
-        eval_task_names: Sequence[str],
         ignore_idx: int,
         img_size: tuple[int, int],
         encoder_init_args: dict[str, Any] | None = None,
@@ -51,8 +50,7 @@ class SemanticTraining(SemanticLightningModule):
             decoder_name=decoder_name,
             decoder_init_args=decoder_init_args,
             num_classes_by_task={
-                name: spec.num_classes
-                for name, spec in task_specs.items()
+                name: spec.num_classes for name, spec in task_specs.items()
             },
             upsample_logits=upsample_logits,
             interpolation_mode=interpolation_mode,
@@ -65,7 +63,6 @@ class SemanticTraining(SemanticLightningModule):
         super().__init__(
             network=network,
             tasks=tasks,
-            eval_task_names=eval_task_names,
             ignore_idx=ignore_idx,
             img_size=img_size,
             freeze_encoder=freeze_encoder,

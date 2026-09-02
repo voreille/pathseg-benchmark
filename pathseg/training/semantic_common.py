@@ -168,7 +168,6 @@ class SemanticLightningModule(LightningModule):
         *,
         network: nn.Module,
         tasks: list[dict[str, Any]],
-        eval_task_names: Sequence[str],
         ignore_idx: int,
         img_size: tuple[int, int],
         freeze_encoder: bool,
@@ -189,12 +188,7 @@ class SemanticLightningModule(LightningModule):
         )
 
         self.task_specs = parse_task_specs(tasks)
-        self.eval_task_names = tuple(eval_task_names)
-        if not self.eval_task_names:
-            raise ValueError("eval_task_names cannot be empty.")
-        unknown_eval_tasks = set(self.eval_task_names) - set(self.task_specs)
-        if unknown_eval_tasks:
-            raise ValueError(f"Unknown evaluation tasks: {unknown_eval_tasks}.")
+        self.eval_task_names = list(self.task_specs.keys())
 
         self.ignore_idx = int(ignore_idx)
         self.poly_lr_decay_power = float(poly_lr_decay_power)
@@ -300,6 +294,7 @@ class SemanticLightningModule(LightningModule):
 
     @staticmethod
     def unpack_batch(batch):
+        # TODO: remove if for one task it is the same
         if len(batch) == 2:
             imgs, targets = batch
             return imgs, targets, None, None
@@ -319,6 +314,7 @@ class SemanticLightningModule(LightningModule):
         *,
         batch_size: int,
     ) -> tuple[str, ...] | None:
+        # TODO: rm or simplify
         if task_names is None:
             return None
         if isinstance(task_names, str):
@@ -400,7 +396,7 @@ class SemanticLightningModule(LightningModule):
         return [value[index] for index in route.host_indices]
 
     def _targets_to_per_pixel(self, targets) -> list[torch.Tensor]:
-        # TODO: change this to simple stuff cause it was introduced by chatgpt...
+        # TODO: to rm
         if torch.is_tensor(targets):
             if targets.ndim != 3:
                 raise ValueError(
@@ -418,6 +414,7 @@ class SemanticLightningModule(LightningModule):
         device: torch.device,
     ) -> dict[str, TaskRoute]:
         """Build host and device indices directly from CPU task metadata."""
+        # TODO: simplify
         normalized = self._normalize_task_names(
             task_names,
             batch_size=batch_size,

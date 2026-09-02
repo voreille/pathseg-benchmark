@@ -18,9 +18,16 @@ from pathseg.sae.analysis.collector import (
     TopActivationCollector,
 )
 from pathseg.sae.analysis.interventions import (
+    ablate_reconstructed_tokens,
     ablate_latents,
     decode_latents,
+    decode_reconstructed_tokens,
     linear_logit_delta,
+)
+from pathseg.sae.analysis.latent_selection import (
+    LatentSpec,
+    load_latent_manifest,
+    parse_latent_spec,
 )
 from pathseg.sae.analysis.runner import analyze_sae
 from pathseg.sae.analysis.types import (
@@ -31,18 +38,23 @@ from pathseg.sae.analysis.types import (
 
 __all__ = [
     "AnalysisResult",
+    "LatentSpec",
     "StreamingSAECollector",
     "TaskAttribution",
     "TaskSpec",
     "TopActivation",
     "TopActivationCollector",
+    "ablate_reconstructed_tokens",
     "ablate_latents",
     "analyze_sae",
     "compute_task_attributions",
     "decode_latents",
+    "decode_reconstructed_tokens",
     "decoder_column_norms",
     "head_latent_alignment",
     "linear_logit_delta",
+    "load_latent_manifest",
+    "parse_latent_spec",
     "resolve_task_heads",
     "select_relevant_latents",
 ]

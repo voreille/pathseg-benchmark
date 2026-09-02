@@ -23,7 +23,6 @@ trainer:
         - h0-mini
       save_dir: ./wandb
       log_model: false
-
 model:
   class_path: pathseg.training.semantic.SemanticTraining
   init_args:
@@ -34,33 +33,29 @@ model:
       img_size: [896, 896]
       random_weights: false
       sub_norm: false
-
     decoder_name: linear
     decoder_init_args:
       bias: true
-
     tasks:
       - name: ignite
         num_classes: 16
         loss_weight: 1.0
         class_weights: null
         loss_name: cross_entropy_dice
-      - name: anorak
-        num_classes: 7
-        loss_weight: 1.0
-        class_weights: null
-        loss_name: cross_entropy_dice
+    # - name: anorak
+    #   num_classes: 7
+    #   loss_weight: 1.0
+    #   class_weights: null
+    #   loss_name: cross_entropy_dice
 
     # MultiTaskConcatDataModule returns validation loaders in dataset order.
     ignore_idx: 255
     img_size: [896, 896]
-
     # A 1x1 head emits 64x64 logits for 896x896 input with patch size 14.
     # This explicitly authorizes SemanticSegmenter to upsample to 896x896.
     # When false, any resolution mismatch raises immediately.
     upsample_logits: true
     interpolation_mode: bilinear
-
     tiler_name: grid_pad_tiler
     tiler_init_args:
       tile: 896
@@ -68,13 +63,11 @@ model:
       weighted_blend: true
       pad_mode: replicate
       pad_value: 0.0
-
     lr: 1.0e-4
     weight_decay: 0.05
     poly_lr_decay_power: 0.9
     lr_multiplier_encoder: 0.1
     freeze_encoder: false
-
 data:
   class_path: pathseg.datasets.multitask.MultiTaskConcatDataModule
   init_args:
@@ -87,14 +80,14 @@ data:
         split_csv: metadata.csv
         sampling_weight: 1.0
         fold: 0
-      - name: ANORAK
-        task_name: anorak
-        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
-        images_subdir: images
-        masks_subdir: masks_semantic
-        split_csv: split.csv
-        sampling_weight: 1.0
-        fold: 0
+        # - name: ANORAK
+        #   task_name: anorak
+        #   root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
+        #   images_subdir: images
+        #   masks_subdir: masks_semantic
+        #   split_csv: split.csv
+        #   sampling_weight: 1.0
+        #   fold: 0
     img_size: [896, 896]
     prefetch_factor: 4
     num_workers: 0
@@ -104,4 +97,3 @@ data:
       init_args:
         img_size: [896, 896]
         scale_range: [0.7, 1.4]
-

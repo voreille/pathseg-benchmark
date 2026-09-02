@@ -1,0 +1,17 @@
+# A latent is the integer coordinate in the SAE's num_latents-dimensional
+# code. Task/class/label annotate why it was selected; they do not change the
+# intervention itself.
+latents:
+  - latent_id: 1319
+    task: anorak
+    class_index: 4
+    label: example ANORAK concept
+
+  - latent_id: 1428
+    task: anorak
+    class_index: 5
+    label: second example concept
+
+  # String shorthand is also accepted:
+  # - "234:ignite:15"
+  # - "237:ignite:6"

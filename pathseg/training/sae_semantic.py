@@ -32,7 +32,6 @@ class TopKSAESemanticTraining(SemanticLightningModule):
         decoder_name: str,
         sae_class_path: str,
         tasks: dict[str, dict[str, Any]],
-        eval_task_names: Sequence[str],
         ignore_idx: int,
         img_size: tuple[int, int],
         encoder_init_args: dict[str, Any] | None = None,
@@ -107,7 +106,6 @@ class TopKSAESemanticTraining(SemanticLightningModule):
         super().__init__(
             network=network,
             tasks=tasks,
-            eval_task_names=eval_task_names,
             ignore_idx=ignore_idx,
             img_size=img_size,
             freeze_encoder=True,

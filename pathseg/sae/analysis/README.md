@@ -83,3 +83,109 @@ and the appropriate `input_scale` explicitly.
 The top-activation pass keeps at most two examples per image by default.  Token
 coordinates are stored together with the latent grid size so they can be mapped
 back to the input image without assuming a fixed encoder patch size.
+
+## Selecting concepts
+
+A latent is identified by its integer SAE coordinate. Keep the semantic
+interpretation as metadata in a YAML manifest so the same selection drives both
+visual inspection and causal testing:
+
+```yaml
+latents:
+  - latent_id: 1319
+    task: anorak
+    class_index: 4
+    label: candidate pattern concept
+  - latent_id: 234
+    task: ignite
+    class_index: 15
+    label: candidate compartment concept
+```
+
+`task`, `class_index`, and `label` record why a latent was selected. Ablation
+always means zeroing that integer SAE coordinate, independent of the metadata.
+The equivalent repeatable command-line shorthand is
+`--latent 1319:anorak:4 --latent 234:ignite:15`.
+
+For contact sheets, images are selected automatically from the frozen
+`top_activations.jsonl` produced by the statistics command. This is preferable
+to choosing attractive images manually: the examples are ranked by activation,
+limited per source image during collection, and exactly replayable by
+`dataset_name + sample_id` (including `::crop_N`). If a task or class is in the
+latent specification, the examples are restricted to that task/class. Use just
+the latent ID to inspect its strongest examples across both datasets.
+
+## Contact sheets
+
+```bash
+python -m pathseg.sae.analysis.contact_sheet \
+    --config configs/sae_two_heads.yaml \
+    --checkpoint runs/checkpoints/my-sae/last.ckpt \
+    --analysis-dir runs/checkpoints/my-sae/analysis \
+    --manifest configs/sae_concepts.yaml \
+    --examples 16
+```
+
+This creates one PNG per manifest entry plus `contact_sheets.json` under
+`ANALYSIS_DIR/contact_sheets`. Each example contains:
+
+1. the replayed validation crop with the maximally active token marked;
+2. the full latent activation heatmap, on one shared scale per sheet;
+3. a local target-mask view around that token.
+
+The stored and recomputed activation values are printed together. A discrepancy
+is a useful warning that the checkpoint, transforms, crop geometry, or precision
+does not match the original analysis run. If the original statistics were
+collected with `--no-window-inputs`, pass that flag to the contact-sheet command
+too.
+
+## Full-image causal ablation
+
+Start with one or two batches to validate memory and output:
+
+```bash
+python -m pathseg.sae.analysis.ablation \
+    --config configs/sae_two_heads.yaml \
+    --checkpoint runs/checkpoints/my-sae/last.ckpt \
+    --output-dir runs/checkpoints/my-sae/analysis/ablation-smoke \
+    --manifest configs/sae_concepts.yaml \
+    --max-batches-per-loader 2
+```
+
+Then remove the batch limit for the real result:
+
+```bash
+python -m pathseg.sae.analysis.ablation \
+    --config configs/sae_two_heads.yaml \
+    --checkpoint runs/checkpoints/my-sae/last.ckpt \
+    --output-dir runs/checkpoints/my-sae/analysis/ablation \
+    --manifest configs/sae_concepts.yaml
+```
+
+Every selected latent is evaluated individually on both heads by default. Use
+`--task anorak` or repeat `--task` to restrict the validation loaders. The
+command forwards each crop through the encoder and SAE once. For latent `j`, it
+computes the exact zero-ablation efficiently as
+
+```text
+ablated_reconstruction = reconstruction - activation[j] * decoder_column[j]
+```
+
+It then runs the real task decoder and the training module's normal stitching
+function. The baseline is the SAE reconstruction, so `delta_miou` isolates the
+latent intervention rather than mixing it with SAE reconstruction error.
+
+Outputs:
+
+- `ablation_overall.csv`: firing rate, mean active activation, prediction flip
+  rate, baseline/ablated mIoU, `delta_miou`, and positive `miou_drop`.
+- `ablation_per_class.csv`: the same causal comparison at class-IoU level.
+- `ablation.json`: nested machine-readable results and the exact selection
+  metadata.
+
+mIoU matches the training module's
+`MulticlassJaccardIndex(average=None).mean()`: all configured classes use one
+fixed denominator, and a class with zero union contributes zero. The command
+caps individual interventions at 64 by default because runtime grows linearly
+with the number of latents; raise `--max-latents` explicitly after ranking a
+smaller candidate set.
