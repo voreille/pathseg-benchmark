@@ -200,6 +200,7 @@ class SemanticLightningModule(LightningModule):
             }
         )
 
+        # TODO: add metric for position info
         self.iou_metrics, self.f1_metrics = self._make_metric_streams()
 
     @property
