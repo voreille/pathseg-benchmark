@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import torch
 
-from pathseg.models.builders_semantic import build_semantic_segmenter
 from pathseg.models.builders import build_tiler
+from pathseg.models.builders_semantic import build_semantic_segmenter
 from pathseg.training.semantic_common import (
     SemanticLightningModule,
     parse_task_specs,
@@ -15,25 +16,25 @@ from pathseg.training.semantic_common import (
 class SemanticTraining(SemanticLightningModule):
     """Train a single- or multi-task semantic segmenter.
 
-    Mixed-task training batches follow the legacy format::
+    Mixed-task training batches follow this format::
 
-        (imgs, targets, source_ids, image_ids)
+        (imgs, targets, task_names, image_ids)
 
-    Every task is trained only on samples whose source_id matches its task
-    configuration. A single-task batch may omit source_ids.
+    Every task is trained only on samples carrying its task name. A single-task
+    batch may omit task names.
     """
 
     def __init__(
         self,
         encoder_class_path: str,
         decoder_name: str,
-        tasks: dict[str, dict[str, Any]],
+        tasks: list[dict[str, Any]],
         eval_task_names: Sequence[str],
         ignore_idx: int,
         img_size: tuple[int, int],
         encoder_init_args: dict[str, Any] | None = None,
         decoder_init_args: dict[str, Any] | None = None,
-        tiler_name: Optional[str] = None,
+        tiler_name: str | None = None,
         tiler_init_args: dict[str, Any] | None = None,
         lr: float = 1e-4,
         weight_decay: float = 0.05,
@@ -50,8 +51,7 @@ class SemanticTraining(SemanticLightningModule):
             decoder_name=decoder_name,
             decoder_init_args=decoder_init_args,
             num_classes_by_task={
-                name: spec.num_classes
-                for name, spec in task_specs.items()
+                name: spec.num_classes for name, spec in task_specs.items()
             },
             upsample_logits=upsample_logits,
             interpolation_mode=interpolation_mode,
@@ -77,21 +77,35 @@ class SemanticTraining(SemanticLightningModule):
         self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):
-        imgs, targets, source_ids, _image_ids = self.unpack_batch(batch)
-        logits_by_task = self(imgs)
+        imgs, targets, task_names, _image_ids = self.unpack_batch(batch)
+        if not torch.is_tensor(imgs) or imgs.ndim != 4:
+            raise ValueError(
+                "Training images must be a BxCxHxW tensor, got "
+                f"{type(imgs).__name__} with shape="
+                f"{getattr(imgs, 'shape', None)}."
+            )
 
-        losses: dict[str, torch.Tensor] = {}
+        batch_size = int(imgs.shape[0])
+        logits_by_task = self(imgs)
+        expected_tasks = set(self.task_specs)
+        returned_tasks = set(logits_by_task)
+        if returned_tasks != expected_tasks:
+            raise ValueError(
+                "The semantic segmenter must return exactly the configured "
+                f"task heads; missing={sorted(expected_tasks - returned_tasks)}, "
+                f"unknown={sorted(returned_tasks - expected_tasks)}."
+            )
+
         weighted_losses: list[torch.Tensor] = []
 
         for task, logits in logits_by_task.items():
             mask = self.task_mask(
                 task,
-                source_ids,
-                batch_size=imgs.shape[0],
+                task_names,
+                batch_size=batch_size,
                 device=imgs.device,
             )
             loss = self.task_loss(task, logits, targets, mask)
-            losses[task] = loss
             weighted_losses.append(self.task_specs[task].loss_weight * loss)
 
             self.log(
@@ -99,12 +113,14 @@ class SemanticTraining(SemanticLightningModule):
                 loss,
                 sync_dist=True,
                 prog_bar=False,
+                batch_size=batch_size,
             )
             self.log(
                 f"train_{task}_fraction",
                 mask.float().mean(),
                 sync_dist=True,
                 prog_bar=False,
+                batch_size=batch_size,
             )
 
         loss_total = torch.stack(weighted_losses).sum()
@@ -113,5 +129,6 @@ class SemanticTraining(SemanticLightningModule):
             loss_total,
             sync_dist=True,
             prog_bar=True,
+            batch_size=batch_size,
         )
         return loss_total

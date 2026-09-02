@@ -295,6 +295,9 @@ def launch_sae(
                 str(resolved_path),
                 *lightning_args,
             ],
+            save_config_kwargs={
+                "overwrite": True,
+            },
         )
 
 

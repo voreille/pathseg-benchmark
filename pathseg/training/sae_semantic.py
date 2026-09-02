@@ -189,6 +189,7 @@ class TopKSAESemanticTraining(SemanticLightningModule):
                 value,
                 sync_dist=True,
                 prog_bar=prog_bar and name == "loss_total",
+                batch_size=batch_size,
             )
 
     def training_step(self, batch, batch_idx):
@@ -222,7 +223,7 @@ class TopKSAESemanticTraining(SemanticLightningModule):
         self._log_sae_statistics(
             statistics,
             f"{log_prefix}_{dataloader_idx}_{task}",
-            batch_size=imgs.shape[0],
+            batch_size=len(imgs),
         )
 
         reconstructed_logits_by_task = self.stitch_logits_by_task(

@@ -525,6 +525,47 @@
                 "HYDRA_FULL_ERROR": "1"
             },
             "justMyCode": false
-        }
+        },
+        {
+            "name": "Python:  Fit SAE IGNITE+ANORAK - new",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg.training.sae_launcher",
+            "args": [
+                "--config",
+                "configs/sae_two_heads.yaml"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "1",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+        {
+            "name": "Python: main.py fit ANORAK+IGNITE MultiTask Semantic - new",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg",
+            "args": [
+                "fit",
+                "-c",
+                "configs/semantic_two_heads.yaml",
+                "--no_compile",
+                "--trainer.logger=false",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        },
+ 
+ 
     ]
 }

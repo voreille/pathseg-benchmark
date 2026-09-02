@@ -18,7 +18,7 @@ trainer:
       project: pathseg-benchmark
       name: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1
       id: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1
-      resume: never
+      resume: allow
       group: ANORAK
       job_type: sae
 

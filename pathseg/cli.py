@@ -306,7 +306,7 @@ def main() -> None:
         save_config_callback=SaveConfigToCheckpointDir,
         save_config_kwargs={
             "config_filename": "config.yaml",
-            "overwrite": False,
+            "overwrite": True,
             "save_to_log_dir": False,
         },
         seed_everything_default=0,

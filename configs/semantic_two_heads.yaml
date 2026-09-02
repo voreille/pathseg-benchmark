@@ -8,8 +8,8 @@ trainer:
     class_path: lightning.pytorch.loggers.wandb.WandbLogger
     init_args:
       project: pathseg-benchmark
-      id: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3
-      resume: never
+      # id: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3
+      # resume: never
       group: ANORAK
       job_type: baseline
       tags:
@@ -39,8 +39,6 @@ model:
     decoder_init_args:
       bias: true
 
-    # These names replace num_classes_a/b and source_id_a/b. Mixed training
-    # batches supervise each head only on its matching source subset.
     tasks:
       - name: ignite
         num_classes: 16
@@ -49,7 +47,6 @@ model:
         loss_name: cross_entropy_dice
       - name: anorak
         num_classes: 7
-        source_id: 1
         loss_weight: 1.0
         class_weights: null
         loss_name: cross_entropy_dice

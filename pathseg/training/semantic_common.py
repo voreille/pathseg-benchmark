@@ -9,9 +9,9 @@ import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torch.nn as nn
 from matplotlib.lines import Line2D
 from PIL import Image
+from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
@@ -20,38 +20,90 @@ from pathseg.training.histo_loss import CrossEntropyDiceLoss
 from pathseg.training.lightning_module import LightningModule
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SemanticTaskSpec:
     name: str
     num_classes: int
-    loss_weight: float
-    class_weights: tuple[float, ...] | None
-    loss_name: str
+    loss_weight: float = 1.0
+    class_weights: tuple[float, ...] | None = None
+    loss_name: str = "cross_entropy"
+
+    def __post_init__(self) -> None:
+        if not self.name.strip():
+            raise ValueError("Task name cannot be empty.")
+        if "." in self.name:
+            raise ValueError(
+                f"Task name {self.name!r} cannot contain '.', because it is "
+                "used as a ModuleDict key."
+            )
+        if self.num_classes < 2:
+            raise ValueError(f"Task {self.name!r}: num_classes must be at least 2.")
+        if self.loss_weight < 0:
+            raise ValueError(f"Task {self.name!r}: loss_weight cannot be negative.")
+        if self.class_weights is not None:
+            if len(self.class_weights) != self.num_classes:
+                raise ValueError(
+                    f"Task {self.name!r}: expected {self.num_classes} class "
+                    f"weights, got {len(self.class_weights)}."
+                )
+            if any(weight < 0 for weight in self.class_weights):
+                raise ValueError(
+                    f"Task {self.name!r}: class weights cannot be negative."
+                )
+
+    @classmethod
+    def from_mapping(cls, config: Mapping[str, Any]) -> SemanticTaskSpec:
+        values = dict(config)
+        class_weights = values.get("class_weights")
+        if class_weights is not None:
+            values["class_weights"] = tuple(float(weight) for weight in class_weights)
+
+        try:
+            values["name"] = str(values["name"])
+            values["num_classes"] = int(values["num_classes"])
+            if "loss_weight" in values:
+                values["loss_weight"] = float(values["loss_weight"])
+            if "loss_name" in values:
+                values["loss_name"] = str(values["loss_name"])
+            return cls(**values)
+        except KeyError as error:
+            raise ValueError(
+                f"Task configuration is missing required field {error.args[0]!r}: "
+                f"{config!r}."
+            ) from error
+        except TypeError as error:
+            name = values.get("name", "<unnamed>")
+            raise ValueError(
+                f"Invalid configuration for task {name!r}: {error}"
+            ) from error
 
 
 def parse_task_specs(
-    tasks: list[dict[str, Any]],
+    tasks: Sequence[Mapping[str, Any]],
 ) -> dict[str, SemanticTaskSpec]:
     if not tasks:
         raise ValueError("At least one semantic task must be configured.")
+    if isinstance(tasks, Mapping):
+        raise TypeError(
+            "tasks must be an explicit list of task configurations, not a "
+            "mapping keyed by task name."
+        )
 
     parsed: dict[str, SemanticTaskSpec] = {}
 
-    for task_name, config in tasks.items():
-        class_weights = config.get("class_weights")
-        if class_weights is not None:
-            class_weights = tuple(float(weight) for weight in class_weights)
+    for index, config in enumerate(tasks):
+        if not isinstance(config, Mapping):
+            raise TypeError(
+                f"tasks[{index}] must be a mapping, got {type(config).__name__}."
+            )
 
-        parsed[task_name] = SemanticTaskSpec(
-            name=task_name,
-            num_classes=int(config["num_classes"]),
-            loss_weight=float(config.get("loss_weight", 1.0)),
-            loss_name=str(config.get("loss_name", "cross_entropy")),
-            class_weights=class_weights,
-        )
+        spec = SemanticTaskSpec.from_mapping(config)
+        if spec.name in parsed:
+            raise ValueError(f"Duplicate task name: {spec.name!r}.")
+        parsed[spec.name] = spec
 
-    if len(parsed) > 1 and any(spec.task_name is None for spec in parsed.values()):
-        raise ValueError("Every task needs a source_id when multiple tasks are used.")
+    if not any(spec.loss_weight > 0 for spec in parsed.values()):
+        raise ValueError("At least one task must have a positive loss weight.")
 
     return parsed
 
@@ -78,15 +130,15 @@ class SemanticLightningModule(LightningModule):
     """Shared multi-task semantic evaluation and optimization infrastructure.
 
     `eval_task_names[dataloader_idx]` identifies the head evaluated by each
-    validation/test dataloader. Training batches may mix tasks and use source_ids
-    to select the supervised subset for every head.
+    validation/test dataloader. Training batches may mix tasks and carry one
+    string task name per sample to select the supervised subset for every head.
     """
 
     def __init__(
         self,
         *,
         network: nn.Module,
-        tasks: dict[str, dict[str, Any]],
+        tasks: list[dict[str, Any]],
         eval_task_names: Sequence[str],
         ignore_idx: int,
         img_size: tuple[int, int],
@@ -171,14 +223,84 @@ class SemanticLightningModule(LightningModule):
             imgs, targets = batch
             return imgs, targets, None, None
         if len(batch) == 3:
-            imgs, targets, source_ids = batch
-            return imgs, targets, source_ids, None
+            imgs, targets, task_names = batch
+            return imgs, targets, task_names, None
         if len(batch) == 4:
             return batch
         raise ValueError(
-            "Expected (imgs, targets), (imgs, targets, source_ids), or "
-            "(imgs, targets, source_ids, image_ids)."
+            "Expected (imgs, targets), (imgs, targets, task_names), or "
+            "(imgs, targets, task_names, image_ids)."
         )
+
+    @staticmethod
+    def _normalize_task_names(
+        task_names,
+        *,
+        batch_size: int,
+    ) -> tuple[str, ...] | None:
+        if task_names is None:
+            return None
+        if isinstance(task_names, str):
+            if batch_size != 1:
+                raise ValueError(
+                    "A scalar task name is valid only for a batch of size 1."
+                )
+            return (task_names,)
+
+        if len(task_names) != batch_size:
+            raise ValueError(
+                f"Received {len(task_names)} task names for batch size {batch_size}."
+            )
+
+        normalized: list[str] = []
+        for index, name in enumerate(task_names):
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"task_names[{index}] must be a string, got "
+                    f"{type(name).__name__}. Numeric source IDs are no longer "
+                    "supported."
+                )
+            if not name:
+                raise ValueError(f"task_names[{index}] cannot be empty.")
+            normalized.append(name)
+        return tuple(normalized)
+
+    def _evaluation_task(
+        self,
+        task_names,
+        *,
+        batch_size: int,
+        dataloader_idx: int,
+    ) -> str:
+        if not 0 <= dataloader_idx < len(self.eval_task_names):
+            raise IndexError(
+                f"dataloader_idx={dataloader_idx} has no matching entry in "
+                f"eval_task_names={self.eval_task_names}."
+            )
+
+        expected_task = self.eval_task_names[dataloader_idx]
+        normalized = self._normalize_task_names(
+            task_names,
+            batch_size=batch_size,
+        )
+        if normalized is None:
+            return expected_task
+
+        batch_tasks = set(normalized)
+        if len(batch_tasks) != 1:
+            raise ValueError(
+                "Every evaluation dataloader must produce task-homogeneous "
+                f"batches, got tasks={sorted(batch_tasks)}."
+            )
+
+        batch_task = next(iter(batch_tasks))
+        if batch_task != expected_task:
+            raise ValueError(
+                f"Evaluation dataloader {dataloader_idx} produced task "
+                f"{batch_task!r}, but eval_task_names expects "
+                f"{expected_task!r}."
+            )
+        return batch_task
 
     @staticmethod
     def _select_batch(value, mask: torch.Tensor):
@@ -199,19 +321,33 @@ class SemanticLightningModule(LightningModule):
     def task_mask(
         self,
         task: str,
-        source_ids: torch.Tensor | None,
+        task_names,
         batch_size: int,
         device: torch.device,
     ) -> torch.Tensor:
-        source_id = self.task_specs[task].task_name
-        if source_id is None:
-            return torch.ones(batch_size, dtype=torch.bool, device=device)
-        if source_ids is None:
+        if task not in self.task_specs:
+            raise KeyError(f"Unknown task {task!r}.")
+
+        normalized = self._normalize_task_names(
+            task_names,
+            batch_size=batch_size,
+        )
+        if normalized is None:
+            if len(self.task_specs) == 1:
+                return torch.ones(batch_size, dtype=torch.bool, device=device)
             raise ValueError(
-                f"Task {task!r} has source_id={source_id}, but the batch has "
-                "no source_ids."
+                "Multi-task training batches must contain one task name per sample."
             )
-        return source_ids.to(device) == source_id
+
+        unknown_tasks = set(normalized) - set(self.task_specs)
+        if unknown_tasks:
+            raise ValueError(f"Batch contains unknown tasks: {sorted(unknown_tasks)}.")
+
+        return torch.tensor(
+            [name == task for name in normalized],
+            dtype=torch.bool,
+            device=device,
+        )
 
     def task_loss(
         self,
@@ -451,8 +587,13 @@ class SemanticLightningModule(LightningModule):
         dataloader_idx: int,
         log_prefix: str,
     ):
-        imgs, targets, _source_ids, _image_ids = self.unpack_batch(batch)
-        task = self.eval_task_names[dataloader_idx]
+        imgs, targets, task_names, _image_ids = self.unpack_batch(batch)
+        batch_size = imgs.shape[0] if torch.is_tensor(imgs) else len(imgs)
+        task = self._evaluation_task(
+            task_names,
+            batch_size=batch_size,
+            dataloader_idx=dataloader_idx,
+        )
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         plot_all_heads = batch_idx == 0
@@ -507,10 +648,15 @@ class SemanticLightningModule(LightningModule):
         self.finish_metric_stream("test", self.iou_metrics, self.f1_metrics)
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        imgs, targets, source_ids, image_ids = self.unpack_batch(batch)
+        imgs, targets, task_names, image_ids = self.unpack_batch(batch)
+        batch_size = imgs.shape[0] if torch.is_tensor(imgs) else len(imgs)
+        task = self._evaluation_task(
+            task_names,
+            batch_size=batch_size,
+            dataloader_idx=dataloader_idx,
+        )
         if not torch.is_tensor(imgs):
             imgs = torch.stack(list(imgs)).to(self.device)
-        task = self.eval_task_names[dataloader_idx]
 
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops, task=task)[task]
@@ -520,7 +666,7 @@ class SemanticLightningModule(LightningModule):
         outputs = []
         for index, logit in enumerate(logits):
             output = {
-                "task": task,
+                "task_name": task,
                 "logits": logit.detach().cpu(),
                 "pred": logit.argmax(dim=0).detach().cpu(),
                 "target": target_maps[index].detach().cpu(),
@@ -528,8 +674,6 @@ class SemanticLightningModule(LightningModule):
             }
             if image_ids is not None:
                 output["img_id"] = image_ids[index]
-            if source_ids is not None:
-                output["source_id"] = int(source_ids[index])
             outputs.append(output)
 
         return outputs
