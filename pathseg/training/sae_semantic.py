@@ -236,7 +236,7 @@ class TopKSAESemanticTraining(SemanticLightningModule):
         )
         reconstructed_logits = reconstructed_logits_by_task[task]
         original_logits = original_logits_by_task[task]
-        target_maps = self._targets_to_per_pixel(targets)
+        target_maps = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 
         self.update_metric_stream(
             self.iou_metrics,

@@ -395,17 +395,6 @@ class SemanticLightningModule(LightningModule):
             return value.index_select(0, indices)
         return [value[index] for index in route.host_indices]
 
-    def _targets_to_per_pixel(self, targets) -> list[torch.Tensor]:
-        # TODO: to rm
-        if torch.is_tensor(targets):
-            if targets.ndim != 3:
-                raise ValueError(
-                    f"Per-pixel targets must be BxHxW, got {tuple(targets.shape)}."
-                )
-            return [target.long() for target in targets]
-
-        return self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
-
     def task_routes(
         self,
         task_names,
@@ -474,7 +463,7 @@ class SemanticLightningModule(LightningModule):
             )
 
         targets_subset = self._select_batch(targets, route)
-        target_maps = self._targets_to_per_pixel(targets_subset)
+        target_maps = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
         target_tensor = torch.stack(target_maps).long().to(logits.device)
 
         return self.criteria[task](logits, target_tensor)
@@ -718,7 +707,7 @@ class SemanticLightningModule(LightningModule):
             img_sizes,
         )
         logits = logits_by_task[task]
-        target_maps = self._targets_to_per_pixel(targets)
+        target_maps = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 
         self.update_metric_stream(
             self.iou_metrics,
@@ -772,7 +761,7 @@ class SemanticLightningModule(LightningModule):
         crops, origins, img_sizes = self.window_imgs_semantic(imgs)
         crop_logits = self(crops, task=task)[task]
         logits = self.stitch_crop_logits(crop_logits, origins, img_sizes)
-        target_maps = self._targets_to_per_pixel(targets)
+        target_maps = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 
         outputs = []
         for index, logit in enumerate(logits):
