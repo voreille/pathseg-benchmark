@@ -316,7 +316,7 @@ def main() -> None:
             "enable_model_summary": False,
             "callbacks": [
                 ModelSummary(max_depth=2),
-                ModelCheckpoint(),
+                ModelCheckpoint(save_last=True),
             ],
             "devices": 1,
             "gradient_clip_val": 1,

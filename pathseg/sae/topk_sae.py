@@ -72,3 +72,14 @@ class TopKSAE(nn.Module):
         latents = self.encode(x)
         reconstruction = self.decode(latents)
         return reconstruction, latents
+
+    def forward_with_aux(
+        self,
+        x: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        reconstruction, latents = self(x)
+
+        return {
+            "reconstructed_tokens": reconstruction,
+            "latents": latents,
+        }

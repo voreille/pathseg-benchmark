@@ -1,0 +1,65 @@
+# Minimal SAE config. The launcher reuses the semantic run's resolved model and
+# data sections, then loads its encoder/decoder weights from the checkpoint.
+semantic_run:
+  config_path: /home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3/config.yaml
+  checkpoint_path: /home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3/last.ckpt
+trainer:
+  default_root_dir: runs
+
+  precision: "16-mixed"
+  max_steps: 40000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  accumulate_grad_batches: 1
+
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: pathseg-benchmark
+      name: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1
+      id: h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1
+      resume: never
+      group: ANORAK
+      job_type: sae
+
+      # LightningCLI will also save config.yaml here.
+      save_dir: &run_dir runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1
+      log_model: false
+
+      tags:
+        - 20x
+        - 896x896
+        - multitask
+        - h0-mini
+        - sae
+        - topk-32
+
+  callbacks:
+    - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+      init_args:
+        dirpath: *run_dir
+        filename: "step-{step:08d}"
+        auto_insert_metric_name: false
+        every_n_train_steps: 1000
+        save_on_train_epoch_end: false
+        save_top_k: 0
+        save_last: true
+sae:
+  # Pure SAE module, not a LightningModule.
+  class_path: pathseg.sae.topk_sae.TopKSAE
+  init_args:
+    input_dim: 768
+    num_latents: 3072
+    k: 32
+
+  lr: 3.0e-4
+  weight_decay: 0.0
+  poly_lr_decay_power: 0.9
+  normalize_decoder: true
+
+# Optional initial SAE weights, separate from resuming an SAE training run:
+#   checkpoint_path: runs/other_sae/checkpoints/best.ckpt
+#   checkpoint_prefix: network.sae
+
+# Optional full SAE-run resume checkpoint passed to Trainer.fit(ckpt_path=...):
+# ckpt_path: runs/sae/checkpoints/last.ckpt
