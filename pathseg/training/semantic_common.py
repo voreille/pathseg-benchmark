@@ -108,6 +108,33 @@ def parse_task_specs(
     return parsed
 
 
+@dataclass(frozen=True, slots=True)
+class TaskRoute:
+    """Indices for one task without a device-to-host synchronization.
+
+    ``host_indices`` selects Python containers such as the raw target list.
+    ``device_indices`` selects tensors that already live with the model. Both
+    are created from CPU task-name metadata, so selecting Python targets never
+    requires calling ``tolist()`` on a CUDA tensor.
+    """
+
+    host_indices: tuple[int, ...]
+    device_indices: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.device_indices.dtype != torch.long:
+            raise TypeError("TaskRoute.device_indices must have dtype torch.long.")
+        if self.device_indices.ndim != 1:
+            raise ValueError("TaskRoute.device_indices must be one-dimensional.")
+        if len(self.host_indices) != self.device_indices.numel():
+            raise ValueError(
+                "TaskRoute host/device indices must contain the same number of samples."
+            )
+
+    def __len__(self) -> int:
+        return len(self.host_indices)
+
+
 def build_criterion(
     spec: SemanticTaskSpec,
     ignore_idx: int,
@@ -131,7 +158,9 @@ class SemanticLightningModule(LightningModule):
 
     `eval_task_names[dataloader_idx]` identifies the head evaluated by each
     validation/test dataloader. Training batches may mix tasks and carry one
-    string task name per sample to select the supervised subset for every head.
+    string task name per sample. Training converts those names to paired host
+    and device routes, encodes the mixed batch once, and decodes each head only
+    for its own samples.
     """
 
     def __init__(
@@ -191,6 +220,58 @@ class SemanticLightningModule(LightningModule):
         # Images arrive as uint8-like 0..255 tensors in the existing pipeline;
         # the encoder wrapper performs its own mean/std normalization.
         return self.network(imgs / 255.0, task=task)
+
+    def routed_forward(
+        self,
+        imgs: torch.Tensor,
+        routes: Mapping[str, TaskRoute],
+    ) -> dict[str, torch.Tensor]:
+        """Encode a mixed batch once and route feature maps to task heads."""
+        if not routes:
+            raise ValueError("At least one non-empty task route is required.")
+
+        unknown_tasks = set(routes) - set(self.task_specs)
+        if unknown_tasks:
+            raise ValueError(f"Unknown routed tasks: {sorted(unknown_tasks)}.")
+
+        input_size = tuple(imgs.shape[-2:])
+        feature_maps = self.network.encode(imgs / 255.0)
+        logits_by_task: dict[str, torch.Tensor] = {}
+
+        for task, route in routes.items():
+            if not route:
+                raise ValueError(f"Task route {task!r} is empty.")
+            if route.device_indices.device != imgs.device:
+                raise ValueError(
+                    f"Task route {task!r} is on "
+                    f"{route.device_indices.device}, but images are on "
+                    f"{imgs.device}."
+                )
+
+            task_feature_maps = tuple(
+                feature_map.index_select(0, route.device_indices)
+                for feature_map in feature_maps
+            )
+            task_logits = self.network.decode(task_feature_maps, task=task)
+            if set(task_logits) != {task}:
+                raise ValueError(
+                    f"Decoding task {task!r} must return exactly that head; "
+                    f"got {sorted(task_logits)}."
+                )
+
+            task_logits = self.network.ensure_input_resolution(
+                task_logits,
+                input_size,
+            )
+            logits = task_logits[task]
+            if logits.shape[0] != len(route):
+                raise ValueError(
+                    f"Task {task!r} returned {logits.shape[0]} samples for "
+                    f"a route containing {len(route)} samples."
+                )
+            logits_by_task[task] = logits
+
+        return logits_by_task
 
     def _make_metric_streams(self) -> tuple[nn.ModuleList, nn.ModuleList]:
         iou = nn.ModuleList()
@@ -303,10 +384,20 @@ class SemanticLightningModule(LightningModule):
         return batch_task
 
     @staticmethod
-    def _select_batch(value, mask: torch.Tensor):
+    def _select_batch(value, route: TaskRoute):
         if torch.is_tensor(value):
-            return value[mask]
-        return [item for item, keep in zip(value, mask.tolist()) if keep]
+            if value.device == route.device_indices.device:
+                indices = route.device_indices
+            else:
+                # Covers CPU tensor targets without copying CUDA indices back
+                # to the host.
+                indices = torch.tensor(
+                    route.host_indices,
+                    dtype=torch.long,
+                    device=value.device,
+                )
+            return value.index_select(0, indices)
+        return [value[index] for index in route.host_indices]
 
     def _targets_to_per_pixel(self, targets) -> list[torch.Tensor]:
         if torch.is_tensor(targets):
@@ -318,55 +409,77 @@ class SemanticLightningModule(LightningModule):
 
         return self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
 
-    def task_mask(
+    def task_routes(
         self,
-        task: str,
         task_names,
+        *,
         batch_size: int,
         device: torch.device,
-    ) -> torch.Tensor:
-        if task not in self.task_specs:
-            raise KeyError(f"Unknown task {task!r}.")
-
+    ) -> dict[str, TaskRoute]:
+        """Build host and device indices directly from CPU task metadata."""
         normalized = self._normalize_task_names(
             task_names,
             batch_size=batch_size,
         )
         if normalized is None:
             if len(self.task_specs) == 1:
-                return torch.ones(batch_size, dtype=torch.bool, device=device)
-            raise ValueError(
-                "Multi-task training batches must contain one task name per sample."
-            )
+                only_task = next(iter(self.task_specs))
+                normalized = (only_task,) * batch_size
+            else:
+                raise ValueError(
+                    "Multi-task training batches must contain one task name per sample."
+                )
 
         unknown_tasks = set(normalized) - set(self.task_specs)
         if unknown_tasks:
             raise ValueError(f"Batch contains unknown tasks: {sorted(unknown_tasks)}.")
 
-        return torch.tensor(
-            [name == task for name in normalized],
-            dtype=torch.bool,
-            device=device,
-        )
+        indices_by_task: dict[str, list[int]] = {task: [] for task in self.task_specs}
+        for sample_index, task in enumerate(normalized):
+            indices_by_task[task].append(sample_index)
+
+        routes: dict[str, TaskRoute] = {}
+        for task, indices in indices_by_task.items():
+            if not indices:
+                continue
+            host_indices = tuple(indices)
+            routes[task] = TaskRoute(
+                host_indices=host_indices,
+                device_indices=torch.tensor(
+                    host_indices,
+                    dtype=torch.long,
+                    device=device,
+                ),
+            )
+
+        if not routes:
+            raise ValueError(
+                "The training batch did not contain samples for any configured task."
+            )
+        return routes
 
     def task_loss(
         self,
         task: str,
         logits: torch.Tensor,
         targets,
-        subset_mask: torch.Tensor,
+        route: TaskRoute,
     ) -> torch.Tensor:
-        # Keep the absent head connected to the graph for DDP without changing
-        # the loss value.
-        if not subset_mask.any():
-            return logits.sum() * 0.0
+        if task not in self.task_specs:
+            raise KeyError(f"Unknown task {task!r}.")
+        if not route:
+            raise ValueError(f"Cannot compute loss for empty task route {task!r}.")
+        if logits.shape[0] != len(route):
+            raise ValueError(
+                f"Task {task!r} received {logits.shape[0]} routed logits for "
+                f"{len(route)} targets."
+            )
 
-        logits_subset = logits[subset_mask]
-        targets_subset = self._select_batch(targets, subset_mask)
+        targets_subset = self._select_batch(targets, route)
         target_maps = self._targets_to_per_pixel(targets_subset)
         target_tensor = torch.stack(target_maps).long().to(logits.device)
 
-        return self.criteria[task](logits_subset, target_tensor)
+        return self.criteria[task](logits, target_tensor)
 
     def stitch_crop_logits(
         self,

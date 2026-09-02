@@ -51,7 +51,8 @@ class SemanticTraining(SemanticLightningModule):
             decoder_name=decoder_name,
             decoder_init_args=decoder_init_args,
             num_classes_by_task={
-                name: spec.num_classes for name, spec in task_specs.items()
+                name: spec.num_classes
+                for name, spec in task_specs.items()
             },
             upsample_logits=upsample_logits,
             interpolation_mode=interpolation_mode,
@@ -86,26 +87,22 @@ class SemanticTraining(SemanticLightningModule):
             )
 
         batch_size = int(imgs.shape[0])
-        logits_by_task = self(imgs)
-        expected_tasks = set(self.task_specs)
-        returned_tasks = set(logits_by_task)
-        if returned_tasks != expected_tasks:
-            raise ValueError(
-                "The semantic segmenter must return exactly the configured "
-                f"task heads; missing={sorted(expected_tasks - returned_tasks)}, "
-                f"unknown={sorted(returned_tasks - expected_tasks)}."
-            )
+        routes = self.task_routes(
+            task_names,
+            batch_size=batch_size,
+            device=imgs.device,
+        )
+        logits_by_task = self.routed_forward(imgs, routes)
 
         weighted_losses: list[torch.Tensor] = []
 
-        for task, logits in logits_by_task.items():
-            mask = self.task_mask(
+        for task, route in routes.items():
+            loss = self.task_loss(
                 task,
-                task_names,
-                batch_size=batch_size,
-                device=imgs.device,
+                logits_by_task[task],
+                targets,
+                route,
             )
-            loss = self.task_loss(task, logits, targets, mask)
             weighted_losses.append(self.task_specs[task].loss_weight * loss)
 
             self.log(
@@ -113,11 +110,11 @@ class SemanticTraining(SemanticLightningModule):
                 loss,
                 sync_dist=True,
                 prog_bar=False,
-                batch_size=batch_size,
+                batch_size=len(route),
             )
             self.log(
                 f"train_{task}_fraction",
-                mask.float().mean(),
+                len(route) / batch_size,
                 sync_dist=True,
                 prog_bar=False,
                 batch_size=batch_size,
