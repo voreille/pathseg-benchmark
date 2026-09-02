@@ -477,7 +477,7 @@
                 "/home/valentin/workspaces/pathseg-benchmark/data/ood/ignite",
                 "--corruption-type",
                 "tissue_fold"
-           ],
+            ],
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"
             }
@@ -554,7 +554,7 @@
                 "-c",
                 "configs/semantic_two_heads.yaml",
                 "--no_compile",
-                "--trainer.logger=false",
+                "--trainer.logger=false"
             ],
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
@@ -565,7 +565,29 @@
             },
             "justMyCode": false
         },
- 
- 
+        {
+            "name": "Python: SAE Analysis",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pathseg.sae.analysis",
+            "args": [
+                "--config",
+                "/home/valentin/workspaces/pathseg-benchmark/configs/sae_two_heads.yaml",
+                "--checkpoint",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/last.ckpt",
+                "--output-dir",
+                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/analysis/",
+                "--max-batches-per-loader",
+                "2"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "HYDRA_FULL_ERROR": "1"
+            },
+            "justMyCode": false
+        }
     ]
 }

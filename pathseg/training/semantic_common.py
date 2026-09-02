@@ -400,6 +400,7 @@ class SemanticLightningModule(LightningModule):
         return [value[index] for index in route.host_indices]
 
     def _targets_to_per_pixel(self, targets) -> list[torch.Tensor]:
+        # TODO: change this to simple stuff cause it was introduced by chatgpt...
         if torch.is_tensor(targets):
             if targets.ndim != 3:
                 raise ValueError(

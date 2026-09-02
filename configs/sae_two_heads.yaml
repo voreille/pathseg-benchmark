@@ -1,7 +1,7 @@
 # Minimal SAE config. The launcher reuses the semantic run's resolved model and
 # data sections, then loads its encoder/decoder weights from the checkpoint.
 semantic_run:
-  config_path: /home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3/config.yaml
+  config_path: /home/valentin/workspaces/pathseg-benchmark/configs/semantic_two_heads.yaml
   checkpoint_path: /home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-3/last.ckpt
 trainer:
   default_root_dir: runs

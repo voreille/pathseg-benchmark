@@ -18,33 +18,54 @@ def tokens_to_map(tokens, reference_map):
 
 
 class SAESemanticSegmenter(SemanticSegmenter):
-    def forward_sae(self, imgs):
-        feature_maps = self.encode(imgs)
+    def feature_maps_from_latents(
+        self,
+        latents,
+        feature_maps,
+    ):
         final_map = feature_maps[-1]
 
-        tokens = map_to_tokens(final_map)
-        sae_output = self.sae.forward_with_aux(tokens)
-
         reconstructed_map = tokens_to_map(
-            sae_output["reconstructed_tokens"],
+            self.sae.decode(latents),
             final_map,
         )
 
-        reconstructed_feature_maps = (
+        return (
             *feature_maps[:-1],
             reconstructed_map,
         )
 
+    def decode_latents(
+        self,
+        latents,
+        feature_maps,
+        task=None,
+    ):
+        reconstructed_feature_maps = self.feature_maps_from_latents(
+            latents,
+            feature_maps,
+        )
+
+        return self.decode(
+            reconstructed_feature_maps,
+            task=task,
+        )
+
+    def forward_sae(self, imgs):
+        feature_maps = self.encode(imgs)
+        tokens = map_to_tokens(feature_maps[-1])
+        sae_output = self.sae.forward_with_aux(tokens)
+
         return {
             **sae_output,
             "feature_maps": feature_maps,
-            "reconstructed_feature_maps": reconstructed_feature_maps,
         }
 
     def forward(self, imgs, task=None):
         output = self.forward_sae(imgs)
 
-        return self.decode(
-            output["reconstructed_feature_maps"],
+        return self.decode_latents(
+            output["latents"],
+            output["feature_maps"],
             task=task,
         )
