@@ -24,47 +24,33 @@ from pathseg.training.lightning_module import LightningModule
 class SemanticTaskSpec:
     name: str
     num_classes: int
-    source_id: int | None
     loss_weight: float
-    loss_name: str
     class_weights: tuple[float, ...] | None
+    loss_name: str
 
 
 def parse_task_specs(
-    tasks: dict[str, dict[str, Any]],
+    tasks: list[dict[str, Any]],
 ) -> dict[str, SemanticTaskSpec]:
     if not tasks:
         raise ValueError("At least one semantic task must be configured.")
 
     parsed: dict[str, SemanticTaskSpec] = {}
-    source_ids: dict[int, str] = {}
 
-    for name, config in tasks.items():
-        source_id = config.get("source_id")
-        source_id = None if source_id is None else int(source_id)
-
-        if source_id is not None and source_id in source_ids:
-            raise ValueError(
-                f"Tasks {source_ids[source_id]!r} and {name!r} both use "
-                f"source_id={source_id}."
-            )
-        if source_id is not None:
-            source_ids[source_id] = name
-
+    for task_name, config in tasks.items():
         class_weights = config.get("class_weights")
         if class_weights is not None:
             class_weights = tuple(float(weight) for weight in class_weights)
 
-        parsed[name] = SemanticTaskSpec(
-            name=name,
+        parsed[task_name] = SemanticTaskSpec(
+            name=task_name,
             num_classes=int(config["num_classes"]),
-            source_id=source_id,
             loss_weight=float(config.get("loss_weight", 1.0)),
             loss_name=str(config.get("loss_name", "cross_entropy")),
             class_weights=class_weights,
         )
 
-    if len(parsed) > 1 and any(spec.source_id is None for spec in parsed.values()):
+    if len(parsed) > 1 and any(spec.task_name is None for spec in parsed.values()):
         raise ValueError("Every task needs a source_id when multiple tasks are used.")
 
     return parsed
@@ -85,9 +71,7 @@ def build_criterion(
     if spec.loss_name == "cross_entropy_dice":
         return CrossEntropyDiceLoss(ignore_index=ignore_idx, weight=weight)
 
-    raise ValueError(
-        f"Unknown loss {spec.loss_name!r} for task {spec.name!r}."
-    )
+    raise ValueError(f"Unknown loss {spec.loss_name!r} for task {spec.name!r}.")
 
 
 class SemanticLightningModule(LightningModule):
@@ -145,10 +129,7 @@ class SemanticLightningModule(LightningModule):
 
     @property
     def num_classes_by_task(self) -> dict[str, int]:
-        return {
-            name: spec.num_classes
-            for name, spec in self.task_specs.items()
-        }
+        return {name: spec.num_classes for name, spec in self.task_specs.items()}
 
     def forward(
         self,
@@ -222,7 +203,7 @@ class SemanticLightningModule(LightningModule):
         batch_size: int,
         device: torch.device,
     ) -> torch.Tensor:
-        source_id = self.task_specs[task].source_id
+        source_id = self.task_specs[task].task_name
         if source_id is None:
             return torch.ones(batch_size, dtype=torch.bool, device=device)
         if source_ids is None:

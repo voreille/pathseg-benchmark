@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 import torch
@@ -10,8 +11,10 @@ from torch import nn
 from torch.utils.data import (
     ConcatDataset,
     DataLoader,
-    Dataset as TorchDataset,
     WeightedRandomSampler,
+)
+from torch.utils.data import (
+    Dataset as TorchDataset,
 )
 
 from pathseg.datasets.dataset import Dataset as BaseDataset
@@ -19,7 +22,47 @@ from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.datasets.transforms import CustomTransforms
 
 
-class WrapWithSource(TorchDataset):
+@dataclass(frozen=True, slots=True)
+class DatasetConfig:
+    name: str
+    task_name: str
+    root: Path
+    images_subdir: str = "images"
+    masks_subdir: str = "masks_semantic"
+    split_csv: str = "split.csv"
+    sampling_weight: float = 1.0
+    include_in_train: bool = True
+    fold: int | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", Path(self.root))
+
+        if not self.name.strip():
+            raise ValueError("Dataset name cannot be empty.")
+
+        if not self.task_name.strip():
+            raise ValueError(f"Dataset {self.name!r} has an empty task_name.")
+
+        if self.sampling_weight <= 0:
+            raise ValueError(
+                f"Dataset {self.name!r}: sampling_weight must be positive."
+            )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+    ) -> "DatasetConfig":
+        try:
+            return cls(**values)
+        except TypeError as error:
+            name = values.get("name", "<unnamed>")
+            raise ValueError(
+                f"Invalid configuration for dataset {name!r}: {error}"
+            ) from error
+
+
+class WrapWithTaskName(TorchDataset):
     """
     Wrap a base dataset and add a per-sample source_id.
 
@@ -31,9 +74,9 @@ class WrapWithSource(TorchDataset):
       - (image, target, source_id, image_id)
     """
 
-    def __init__(self, base: TorchDataset, source_id: int):
+    def __init__(self, base: TorchDataset, task_name: str):
         self.base = base
-        self.source_id = int(source_id)
+        self.task_name = task_name
 
     def __len__(self) -> int:
         return len(self.base)
@@ -52,7 +95,7 @@ class WrapWithSource(TorchDataset):
                 "Base dataset must return (image, target) or (image, target, image_id)."
             )
 
-        return img, target, self.source_id, image_id
+        return img, target, self.task_name, image_id
 
 
 class MultiTaskConcatDataModule(LightningDataModule):
@@ -93,10 +136,19 @@ class MultiTaskConcatDataModule(LightningDataModule):
         if not datasets or len(datasets) < 2:
             raise ValueError("datasets must be a list with at least two dataset dicts.")
 
-        self.datasets_cfg = datasets
-        self.return_background_mask = bool(return_background_mask)
+        self.datasets_cfg = tuple(
+            DatasetConfig.from_mapping(config) for config in datasets
+        )
+        dataset_names = [config.name for config in self.datasets_cfg]
+        dataset_names = [config.name for config in self.datasets_cfg]
 
-        self.fold = int(fold) if fold is not None else None
+        if len(dataset_names) != len(set(dataset_names)):
+            duplicates = {
+                name for name in dataset_names if dataset_names.count(name) > 1
+            }
+            raise ValueError(f"Duplicate dataset names: {sorted(duplicates)}")
+
+        self.return_background_mask = bool(return_background_mask)
 
         self.num_iterations_per_epoch = int(num_iterations_per_epoch)
         if self.num_iterations_per_epoch <= 0:
@@ -238,16 +290,13 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self.predict_splits = []
 
         for dcfg in self.datasets_cfg:
-            name = dcfg.get("name", f"ds{dcfg.get('source_id', 0)}")
-            root = Path(dcfg["root"])
-            images_dir = root / dcfg.get("images_subdir", "images")
-            masks_dir = root / dcfg.get("masks_subdir", "masks")
-            split_csv = root / dcfg.get("split_csv", "split.csv")
-            source_id = int(dcfg.get("source_id", 0))
-            if self.fold is not None:
-                fold = self.fold
-            else:
-                fold = int(dcfg.get("fold", 0))
+            name = dcfg.name
+            root = dcfg.root
+            images_dir = root / dcfg.images_subdir
+            masks_dir = root / dcfg.masks_subdir
+            split_csv = root / dcfg.split_csv
+            task_name = dcfg.task_name
+            fold = dcfg.fold
 
             df = self._read_split_csv(split_csv)
             train_ids, val_ids, test_ids = self._get_split_ids(df, fold=fold)
@@ -259,7 +308,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     masks_dir=masks_dir,
                     stage="fit",
                 )
-                train_wrapped.append(WrapWithSource(base_train, source_id=source_id))
+                train_wrapped.append(WrapWithTaskName(base_train, source_id=source_id))
 
                 base_val = self._make_base_dataset(
                     ids=val_ids,
@@ -268,7 +317,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="validate",
                 )
                 self.val_wrapped.append(
-                    (name, WrapWithSource(base_val, source_id=source_id))
+                    (name, WrapWithTaskName(base_val, source_id=source_id))
                 )
 
             if stage in ("test", None):
@@ -279,7 +328,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="test",
                 )
                 self.test_wrapped.append(
-                    (name, WrapWithSource(base_test, source_id=source_id))
+                    (name, WrapWithTaskName(base_test, source_id=source_id))
                 )
 
             if stage in ("predict", None):
@@ -290,7 +339,7 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="predict",
                 )
                 self.predict_wrapped.append(
-                    (f"{name}_val", WrapWithSource(base_val_p, source_id=source_id))
+                    (f"{name}_val", WrapWithTaskName(base_val_p, source_id=source_id))
                 )
 
         if stage in ("fit", "validate", None):
