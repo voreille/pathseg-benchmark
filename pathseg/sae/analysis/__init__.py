@@ -18,8 +18,8 @@ from pathseg.sae.analysis.collector import (
     TopActivationCollector,
 )
 from pathseg.sae.analysis.interventions import (
-    ablate_reconstructed_tokens,
     ablate_latents,
+    ablate_reconstructed_tokens,
     decode_latents,
     decode_reconstructed_tokens,
     linear_logit_delta,

@@ -573,11 +573,11 @@
             "module": "pathseg.sae.analysis",
             "args": [
                 "--config",
-                "/home/valentin/workspaces/pathseg-benchmark/configs/sae_two_heads.yaml",
+                "configs/sae_two_heads.yaml",
                 "--checkpoint",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/last.ckpt",
+                "runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/last.ckpt",
                 "--output-dir",
-                "/home/valentin/workspaces/pathseg-benchmark/runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/analysis/",
+                "runs/checkpoints/h0mini-896x896-20x-multitask-linear-decoder-unfrozen-fold0-sae-1/analysis/",
                 "--max-batches-per-loader",
                 "2"
             ],
