@@ -56,6 +56,89 @@ def _shared_semantic_value(
     )
 
 
+def _task_name_sequence(value: Any, *, path: str) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise TypeError(f"{path} must be a sequence of task names.")
+    names = [str(name) for name in value]
+    if not names or any(not name.strip() for name in names):
+        raise ValueError(f"{path} must contain non-empty task names.")
+    return names
+
+
+def _resolve_eval_task_names(
+    model_init_args: Mapping[str, Any],
+    data_init_args: Mapping[str, Any],
+) -> list[str]:
+    """Resolve validation-head order across old and current semantic configs."""
+
+    explicit = model_init_args.get("eval_task_names")
+    if explicit is not None:
+        return _task_name_sequence(
+            explicit,
+            path="semantic config.model.init_args.eval_task_names",
+        )
+
+    # MultiTaskConcatDataModule returns one validation loader per configured
+    # dataset, in this exact order. Preserve duplicates because two datasets
+    # may legitimately evaluate the same semantic task.
+    datasets = data_init_args.get("datasets")
+    if datasets is not None:
+        if not isinstance(datasets, Sequence) or isinstance(
+            datasets,
+            (str, bytes),
+        ):
+            raise TypeError(
+                "semantic config.data.init_args.datasets must be a sequence."
+            )
+        names: list[str] = []
+        for index, raw_dataset in enumerate(datasets):
+            dataset = _as_mapping(
+                raw_dataset,
+                f"semantic config.data.init_args.datasets[{index}]",
+            )
+            task_name = _require(
+                dataset,
+                "task_name",
+                f"semantic config.data.init_args.datasets[{index}]",
+            )
+            names.append(str(task_name))
+        if names and all(name.strip() for name in names):
+            return names
+        raise ValueError(
+            "semantic config.data.init_args.datasets must contain at least "
+            "one non-empty task_name."
+        )
+
+    # Fallback for non-multitask datamodules: use the declaration order of the
+    # semantic tasks. This is unambiguous only when no per-dataset order exists.
+    tasks = _require(
+        model_init_args,
+        "tasks",
+        "semantic config.model.init_args",
+    )
+    if not isinstance(tasks, Sequence) or isinstance(tasks, (str, bytes)):
+        raise TypeError("semantic config.model.init_args.tasks must be a sequence.")
+    names = []
+    for index, raw_task in enumerate(tasks):
+        task = _as_mapping(
+            raw_task,
+            f"semantic config.model.init_args.tasks[{index}]",
+        )
+        names.append(
+            str(
+                _require(
+                    task,
+                    "name",
+                    f"semantic config.model.init_args.tasks[{index}]",
+                )
+            )
+        )
+    return _task_name_sequence(
+        names,
+        path="semantic config.model.init_args.tasks[*].name",
+    )
+
+
 def _resolve_semantic_config_path(
     value: str | Path,
     *,
@@ -127,12 +210,9 @@ def _compose_analysis_config(
                 "semantic config.model.init_args",
             )
         ),
-        "eval_task_names": deepcopy(
-            _require(
-                semantic_model_args,
-                "eval_task_names",
-                "semantic config.model.init_args",
-            )
+        "eval_task_names": _resolve_eval_task_names(
+            semantic_model_args,
+            semantic_data_args,
         ),
         "ignore_idx": _shared_semantic_value(
             "ignore_idx",

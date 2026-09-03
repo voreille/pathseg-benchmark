@@ -43,6 +43,12 @@ opened during analysis. The completed SAE checkpoint already contains the
 encoder and semantic decoder weights. Only `semantic_run.config_path` is needed
 to recover their current architecture and the datamodule configuration.
 
+`model.init_args.eval_task_names` is optional in the referenced semantic
+config. When absent, analysis derives it from
+`data.init_args.datasets[*].task_name`, preserving dataset/validation-loader
+order. For a non-multitask datamodule without `datasets`, it falls back to the
+declared order of `model.init_args.tasks`.
+
 For use from your existing launcher, call:
 
 ```python
