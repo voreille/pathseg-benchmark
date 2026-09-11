@@ -11,7 +11,7 @@ name = "pathseg"
 version = "0.1.0"
 description = "Benchmarking vision foundation models for histopathology semantic segmentation; forked from https://github.com/tue-mps/benchmark-vfm-ss/"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.10,<3.13"
 license = "MIT"
 
 authors = [
