@@ -152,8 +152,7 @@ def _resolve_semantic_config_path(
     path = path.resolve()
     if not path.is_file():
         raise FileNotFoundError(
-            "Semantic config referenced by "
-            f"{sae_config_path} was not found: {path}"
+            f"Semantic config referenced by {sae_config_path} was not found: {path}"
         )
     return path
 
@@ -347,8 +346,7 @@ def build_analysis_objects(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze a trained semantic TopK SAE on all configured validation "
-            "datasets."
+            "Analyze a trained semantic TopK SAE on all configured validation datasets."
         )
     )
     parser.add_argument(
