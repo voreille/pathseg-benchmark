@@ -306,7 +306,7 @@ def main() -> None:
         save_config_callback=SaveConfigToCheckpointDir,
         save_config_kwargs={
             "config_filename": "config.yaml",
-            "overwrite": False,
+            "overwrite": True,
             "save_to_log_dir": False,
         },
         seed_everything_default=0,
@@ -316,7 +316,7 @@ def main() -> None:
             "enable_model_summary": False,
             "callbacks": [
                 ModelSummary(max_depth=2),
-                ModelCheckpoint(),
+                ModelCheckpoint(save_last=True),
             ],
             "devices": 1,
             "gradient_clip_val": 1,

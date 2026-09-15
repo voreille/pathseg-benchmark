@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import pandas as pd
 import torch
@@ -10,8 +12,10 @@ from torch import nn
 from torch.utils.data import (
     ConcatDataset,
     DataLoader,
-    Dataset as TorchDataset,
     WeightedRandomSampler,
+)
+from torch.utils.data import (
+    Dataset as TorchDataset,
 )
 
 from pathseg.datasets.dataset import Dataset as BaseDataset
@@ -19,21 +23,84 @@ from pathseg.datasets.lightning_data_module import LightningDataModule
 from pathseg.datasets.transforms import CustomTransforms
 
 
-class WrapWithSource(TorchDataset):
-    """
-    Wrap a base dataset and add a per-sample source_id.
+@dataclass(frozen=True, slots=True)
+class DatasetConfig:
+    name: str
+    task_name: str
+    root: Path
+    fold: int 
+    images_subdir: str = "images"
+    masks_subdir: str = "masks_semantic"
+    split_csv: str = "split.csv"
+    sampling_weight: float = 1.0
+    include_in_train: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", Path(self.root))
+
+        if not isinstance(self.name, str):
+            raise TypeError("Dataset name must be a string.")
+        if not self.name.strip():
+            raise ValueError("Dataset name cannot be empty.")
+
+        if not isinstance(self.task_name, str):
+            raise TypeError(f"Dataset {self.name!r}: task_name must be a string.")
+        if not self.task_name.strip():
+            raise ValueError(f"Dataset {self.name!r} has an empty task_name.")
+
+        if self.sampling_weight <= 0:
+            raise ValueError(
+                f"Dataset {self.name!r}: sampling_weight must be positive."
+            )
+        if self.fold is not None and self.fold < 0:
+            raise ValueError(f"Dataset {self.name!r}: fold cannot be negative.")
+
+        for field_name in ("images_subdir", "masks_subdir", "split_csv"):
+            if not getattr(self, field_name):
+                raise ValueError(
+                    f"Dataset {self.name!r}: {field_name} cannot be empty."
+                )
+
+    @classmethod
+    def from_mapping(
+        cls,
+        values: Mapping[str, Any],
+    ) -> DatasetConfig:
+        if not isinstance(values, Mapping):
+            raise TypeError(
+                "Each dataset configuration must be a mapping, got "
+                f"{type(values).__name__}."
+            )
+        values = dict(values)
+        if "sampling_weight" in values:
+            values["sampling_weight"] = float(values["sampling_weight"])
+        if values.get("fold") is not None:
+            values["fold"] = int(values["fold"])
+        try:
+            return cls(**values)
+        except TypeError as error:
+            name = values.get("name", "<unnamed>")
+            raise ValueError(
+                f"Invalid configuration for dataset {name!r}: {error}"
+            ) from error
+
+
+class WrapWithTaskName(TorchDataset):
+    """Wrap a dataset and attach its semantic task name to every sample.
 
     Expected base dataset outputs:
       - (image, target) OR
       - (image, target, image_id)
 
     Wrapper output:
-      - (image, target, source_id, image_id)
+      - (image, target, task_name, image_id)
     """
 
-    def __init__(self, base: TorchDataset, source_id: int):
+    def __init__(self, base: TorchDataset, task_name: str):
+        if not task_name:
+            raise ValueError("task_name cannot be empty.")
         self.base = base
-        self.source_id = int(source_id)
+        self.task_name = task_name
 
     def __len__(self) -> int:
         return len(self.base)
@@ -52,20 +119,21 @@ class WrapWithSource(TorchDataset):
                 "Base dataset must return (image, target) or (image, target, image_id)."
             )
 
-        return img, target, self.source_id, image_id
+        return img, target, self.task_name, image_id
 
 
 class MultiTaskConcatDataModule(LightningDataModule):
-    """
-    Multi-dataset datamodule that mixes datasets within a batch using ConcatDataset.
+    """Mix datasets and route every sample to a named semantic task.
 
     Training uses a WeightedRandomSampler so epoch length is controlled by
-    num_iterations_per_epoch rather than dataset repetition.
+    ``num_iterations_per_epoch`` rather than dataset repetition. Dataset names
+    identify data sources; task names identify decoder heads and losses. Several
+    datasets may therefore share one task name.
     """
 
     def __init__(
         self,
-        datasets: List[Dict[str, Any]],
+        datasets: list[dict[str, Any]],
         num_workers: int = 0,
         img_size: tuple[int, int] = (448, 448),
         batch_size: int = 1,
@@ -73,11 +141,10 @@ class MultiTaskConcatDataModule(LightningDataModule):
         scale_range: tuple[float, float] = (0.8, 1.2),
         ignore_idx: int = 255,
         prefetch_factor: int = 2,
-        transforms: Optional[nn.Module] = None,
-        val_transforms: Optional[nn.Module] = None,
+        transforms: nn.Module | None = None,
+        val_transforms: nn.Module | None = None,
         return_background_mask: bool = True,
         num_iterations_per_epoch: int = 1500,
-        fold: Optional[int] = 0,
     ) -> None:
         super().__init__(
             root="",
@@ -90,14 +157,24 @@ class MultiTaskConcatDataModule(LightningDataModule):
             prefetch_factor=prefetch_factor,
         )
 
-        if not datasets or len(datasets) < 2:
-            raise ValueError("datasets must be a list with at least two dataset dicts.")
+        if not datasets:
+            raise ValueError("datasets must contain at least one dataset.")
 
-        self.datasets_cfg = datasets
+        self.datasets_cfg = tuple(
+            DatasetConfig.from_mapping(config) for config in datasets
+        )
+        dataset_names = [config.name for config in self.datasets_cfg]
+
+        if len(dataset_names) != len(set(dataset_names)):
+            duplicates = {
+                name for name in dataset_names if dataset_names.count(name) > 1
+            }
+            raise ValueError(f"Duplicate dataset names: {sorted(duplicates)}")
+
+        if not any(config.include_in_train for config in self.datasets_cfg):
+            raise ValueError("At least one dataset must have include_in_train=true.")
+
         self.return_background_mask = bool(return_background_mask)
-
-        self.fold = int(fold) if fold is not None else None
-
         self.num_iterations_per_epoch = int(num_iterations_per_epoch)
         if self.num_iterations_per_epoch <= 0:
             raise ValueError("num_iterations_per_epoch must be > 0")
@@ -120,13 +197,15 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
         rank_zero_info(f"[MultiTaskConcatDataModule] batch_size={batch_size}")
         rank_zero_info(
-            f"[MultiTaskConcatDataModule] num_iterations_per_epoch={self.num_iterations_per_epoch}"
+            "[MultiTaskConcatDataModule] "
+            f"num_iterations_per_epoch={self.num_iterations_per_epoch}"
         )
-        for d in self.datasets_cfg:
+        for config in self.datasets_cfg:
             rank_zero_info(
-                f"[MultiTaskConcatDataModule] dataset={d.get('name', '?')} "
-                f"root={d['root']} source_id={d.get('source_id')} "
-                f"sampling_weight={d.get('sampling_weight', 1.0)}"
+                f"[MultiTaskConcatDataModule] dataset={config.name} "
+                f"task={config.task_name} root={config.root} "
+                f"sampling_weight={config.sampling_weight} "
+                f"include_in_train={config.include_in_train}"
             )
 
     @staticmethod
@@ -139,15 +218,22 @@ class MultiTaskConcatDataModule(LightningDataModule):
         self,
         df: pd.DataFrame,
         fold: int = 0,
-    ) -> Tuple[List[str], List[str], List[str]]:
+    ) -> tuple[list[str], list[str], list[str]]:
+        required_columns = {"sample_id", "split", "validation_fold"}
+        missing_columns = required_columns - set(df.columns)
+        if missing_columns:
+            raise ValueError(
+                f"Split CSV is missing columns: {sorted(missing_columns)}."
+            )
+
         m_test = df["split"] == "test"
-        m_val = df["validation_fold"] == "fold" + str(fold)
+        m_val = (df["split"] == "train") & (df["validation_fold"] == f"fold{fold}")
         m_train = (df["split"] == "train") & (~m_val)
 
         return (
-            df[m_train]["sample_id"].tolist(),
-            df[m_val]["sample_id"].tolist(),
-            df[m_test]["sample_id"].tolist(),
+            df.loc[m_train, "sample_id"].astype(str).tolist(),
+            df.loc[m_val, "sample_id"].astype(str).tolist(),
+            df.loc[m_test, "sample_id"].astype(str).tolist(),
         )
 
     def _make_base_dataset(
@@ -186,21 +272,17 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
         sample_weights: list[float] = []
 
-        for dcfg, subdataset in zip(self.datasets_cfg, self.train_dataset.datasets):
-            ds_weight = float(dcfg.get("sampling_weight", 1.0))
-            if ds_weight <= 0:
-                raise ValueError(
-                    f"sampling_weight must be > 0 for dataset {dcfg.get('name', '?')}"
-                )
-
+        for config, subdataset in zip(
+            self.train_configs,
+            self.train_dataset.datasets,
+            strict=True,
+        ):
             n = len(subdataset)
             if n == 0:
-                raise ValueError(
-                    f"Dataset {dcfg.get('name', '?')} has zero training samples."
-                )
+                raise ValueError(f"Dataset {config.name!r} has zero training samples.")
 
             # Equal total probability mass per dataset if all sampling_weight=1.0
-            per_sample_weight = ds_weight / n
+            per_sample_weight = config.sampling_weight / n
             sample_weights.extend([per_sample_weight] * n)
 
         return WeightedRandomSampler(
@@ -211,18 +293,18 @@ class MultiTaskConcatDataModule(LightningDataModule):
 
     @staticmethod
     def train_collate(batch):
-        imgs, targets, source_ids, image_ids = [], [], [], []
+        imgs, targets, task_names, image_ids = [], [], [], []
 
-        for img, target, source_id, image_id in batch:
+        for img, target, task_name, image_id in batch:
             imgs.append(img)
             targets.append(target)
-            source_ids.append(int(source_id))
+            task_names.append(str(task_name))
             image_ids.append(str(image_id))
 
         return (
             torch.stack(imgs),
             targets,
-            torch.tensor(source_ids, dtype=torch.long),
+            tuple(task_names),
             image_ids,
         )
 
@@ -230,37 +312,40 @@ class MultiTaskConcatDataModule(LightningDataModule):
     def eval_collate(batch):
         return tuple(zip(*batch))
 
-    def setup(self, stage: Union[str, None] = None) -> "MultiTaskConcatDataModule":
-        train_wrapped = []
+    def setup(self, stage: str | None = None) -> MultiTaskConcatDataModule:
+        train_wrapped: list[TorchDataset] = []
+        self.train_configs: list[DatasetConfig] = []
         self.val_wrapped = []
         self.test_wrapped = []
         self.predict_wrapped = []
         self.predict_splits = []
 
-        for dcfg in self.datasets_cfg:
-            name = dcfg.get("name", f"ds{dcfg.get('source_id', 0)}")
-            root = Path(dcfg["root"])
-            images_dir = root / dcfg.get("images_subdir", "images")
-            masks_dir = root / dcfg.get("masks_subdir", "masks")
-            split_csv = root / dcfg.get("split_csv", "split.csv")
-            source_id = int(dcfg.get("source_id", 0))
-            if self.fold is not None:
-                fold = self.fold
-            else:
-                fold = int(dcfg.get("fold", 0))
+        for config in self.datasets_cfg:
+            root = config.root
+            images_dir = root / config.images_subdir
+            masks_dir = root / config.masks_subdir
+            split_csv = root / config.split_csv
+            fold = config.fold
 
             df = self._read_split_csv(split_csv)
-            train_ids, val_ids, test_ids = self._get_split_ids(df, fold=fold)
+            train_ids, val_ids, test_ids = self._get_split_ids(
+                df,
+                fold=fold,
+            )
 
-            if stage in ("fit", "validate", None):
+            if stage in ("fit", None) and config.include_in_train:
                 base_train = self._make_base_dataset(
                     ids=train_ids,
                     images_dir=images_dir,
                     masks_dir=masks_dir,
                     stage="fit",
                 )
-                train_wrapped.append(WrapWithSource(base_train, source_id=source_id))
+                train_wrapped.append(
+                    WrapWithTaskName(base_train, task_name=config.task_name)
+                )
+                self.train_configs.append(config)
 
+            if stage in ("fit", "validate", None):
                 base_val = self._make_base_dataset(
                     ids=val_ids,
                     images_dir=images_dir,
@@ -268,7 +353,10 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="validate",
                 )
                 self.val_wrapped.append(
-                    (name, WrapWithSource(base_val, source_id=source_id))
+                    (
+                        config.name,
+                        WrapWithTaskName(base_val, task_name=config.task_name),
+                    )
                 )
 
             if stage in ("test", None):
@@ -279,7 +367,10 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="test",
                 )
                 self.test_wrapped.append(
-                    (name, WrapWithSource(base_test, source_id=source_id))
+                    (
+                        config.name,
+                        WrapWithTaskName(base_test, task_name=config.task_name),
+                    )
                 )
 
             if stage in ("predict", None):
@@ -290,10 +381,18 @@ class MultiTaskConcatDataModule(LightningDataModule):
                     stage="predict",
                 )
                 self.predict_wrapped.append(
-                    (f"{name}_val", WrapWithSource(base_val_p, source_id=source_id))
+                    (
+                        f"{config.name}_val",
+                        WrapWithTaskName(
+                            base_val_p,
+                            task_name=config.task_name,
+                        ),
+                    )
                 )
 
-        if stage in ("fit", "validate", None):
+        if stage in ("fit", None):
+            if not train_wrapped:
+                raise ValueError("No datasets are enabled for training.")
             self.train_dataset = ConcatDataset(train_wrapped)
 
         return self

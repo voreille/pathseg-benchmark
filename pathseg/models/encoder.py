@@ -161,6 +161,11 @@ class Encoder(nn.Module):
 
         self.encoder, encoder_meta = build_encoder(encoder_id, random_weights)
         patch_size = encoder_meta["patch_size"]
+        self.patch_size = (
+            (patch_size, patch_size)
+            if isinstance(patch_size, int)
+            else tuple(patch_size)
+        )
 
         pixel_mean = torch.tensor(encoder_meta["pixel_mean"]).reshape(1, -1, 1, 1)
         pixel_std = torch.tensor(encoder_meta["pixel_std"]).reshape(1, -1, 1, 1)
@@ -325,14 +330,66 @@ class Encoder(nn.Module):
 
         return nn.Parameter(rel_pos)
 
-    def forward(self, x: torch.Tensor):
+    def forward_tokens(self, x: torch.Tensor) -> torch.Tensor:
         x = (x - self.pixel_mean) / self.pixel_std
+        output = self.encoder.forward_features(x)
 
-        x = self.encoder.forward_features(x)
+        if output.ndim == 3:
+            num_prefix_tokens = getattr(
+                self.encoder,
+                "num_prefix_tokens",
+                0,
+            )
+            return output[:, num_prefix_tokens:]
 
-        if x.dim() == 4:
-            x = x.flatten(2).transpose(1, 2)
-        else:
-            x = x[:, self.encoder.num_prefix_tokens :]
+        if output.ndim == 4:
+            if output.shape[1] == self.embed_dim:
+                # NCHW
+                return output.flatten(2).transpose(1, 2)
 
-        return x
+            if output.shape[-1] == self.embed_dim:
+                # NHWC
+                return output.flatten(1, 2)
+
+            raise RuntimeError(f"Cannot determine output layout from {output.shape}.")
+
+        raise RuntimeError(f"Unexpected encoder output shape: {output.shape}.")
+
+    def forward_feature_maps(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        input_height, input_width = x.shape[-2:]
+        patch_height, patch_width = self.patch_size
+
+        if input_height % patch_height != 0 or input_width % patch_width != 0:
+            raise ValueError(
+                f"Input size {(input_height, input_width)} must be "
+                f"divisible by patch size {self.patch_size}."
+            )
+
+        grid_height = input_height // patch_height
+        grid_width = input_width // patch_width
+
+        tokens = self.forward_tokens(x)
+        batch_size, num_tokens, embed_dim = tokens.shape
+
+        expected_tokens = grid_height * grid_width
+        if num_tokens != expected_tokens:
+            raise RuntimeError(
+                f"Encoder produced {num_tokens} spatial tokens, but "
+                f"input and patch sizes imply {grid_height} × "
+                f"{grid_width} = {expected_tokens}."
+            )
+
+        feature_map = tokens.transpose(1, 2).reshape(
+            batch_size,
+            embed_dim,
+            grid_height,
+            grid_width,
+        )
+
+        return (feature_map,)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_tokens(x)
