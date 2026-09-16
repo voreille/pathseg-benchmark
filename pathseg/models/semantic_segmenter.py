@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 FeatureMaps = tuple[torch.Tensor, ...]
 SemanticLogits = dict[str, torch.Tensor]
 
@@ -36,6 +35,16 @@ class SemanticSegmenter(nn.Module):
                 "Semantic logits support only bilinear or bicubic "
                 f"interpolation, got {self.interpolation_mode!r}."
             )
+
+    @property
+    def num_classes_by_task(self) -> dict[str, int]:
+        if hasattr(self.decoder, "num_classes_by_task"):
+            return dict(self.decoder.num_classes_by_task)
+
+        raise AttributeError(
+            "The decoder must have a num_classes_by_task property to "
+            "expose the number of classes for each task."
+        )
 
     def encode(self, imgs: torch.Tensor) -> FeatureMaps:
         feature_maps = self.encoder.forward_feature_maps(imgs)
@@ -94,8 +103,7 @@ class SemanticSegmenter(nn.Module):
         for task, logits in logits_by_task.items():
             if logits.ndim != 4:
                 raise ValueError(
-                    f"Task {task!r} logits must be BxCxHxW, "
-                    f"got {tuple(logits.shape)}."
+                    f"Task {task!r} logits must be BxCxHxW, got {tuple(logits.shape)}."
                 )
 
             logits_size = tuple(logits.shape[-2:])

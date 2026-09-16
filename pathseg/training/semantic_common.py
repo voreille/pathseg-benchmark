@@ -16,91 +16,63 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
+from pathseg.models.semantic_segmenter import SemanticSegmenter
 from pathseg.training.histo_loss import CrossEntropyDiceLoss
 from pathseg.training.lightning_module import LightningModule
 
 
 @dataclass(frozen=True, slots=True)
 class SemanticTaskSpec:
-    name: str
-    num_classes: int
     loss_weight: float = 1.0
     class_weights: tuple[float, ...] | None = None
     loss_name: str = "cross_entropy"
 
     def __post_init__(self) -> None:
-        if not self.name.strip():
-            raise ValueError("Task name cannot be empty.")
-        if "." in self.name:
-            raise ValueError(
-                f"Task name {self.name!r} cannot contain '.', because it is "
-                "used as a ModuleDict key."
-            )
-        if self.num_classes < 2:
-            raise ValueError(f"Task {self.name!r}: num_classes must be at least 2.")
         if self.loss_weight < 0:
-            raise ValueError(f"Task {self.name!r}: loss_weight cannot be negative.")
-        if self.class_weights is not None:
-            if len(self.class_weights) != self.num_classes:
-                raise ValueError(
-                    f"Task {self.name!r}: expected {self.num_classes} class "
-                    f"weights, got {len(self.class_weights)}."
-                )
-            if any(weight < 0 for weight in self.class_weights):
-                raise ValueError(
-                    f"Task {self.name!r}: class weights cannot be negative."
-                )
+            raise ValueError("loss_weight cannot be negative.")
 
-    @classmethod
-    def from_mapping(cls, config: Mapping[str, Any]) -> SemanticTaskSpec:
+        if self.class_weights is not None and any(
+            weight < 0 for weight in self.class_weights
+        ):
+            raise ValueError("class weights cannot be negative.")
+
+
+def parse_task_specs(
+    tasks: Mapping[str, Mapping[str, Any]],
+) -> dict[str, SemanticTaskSpec]:
+    if not tasks:
+        raise ValueError("At least one semantic task must be configured.")
+
+    parsed: dict[str, SemanticTaskSpec] = {}
+
+    for name, config in tasks.items():
+        if not name:
+            raise ValueError("Task name cannot be empty.")
+
+        if "." in name:
+            raise ValueError(
+                f"Task name {name!r} cannot contain '.', "
+                "because it is used as a ModuleDict key."
+            )
+
         values = dict(config)
+
         class_weights = values.get("class_weights")
         if class_weights is not None:
             values["class_weights"] = tuple(float(weight) for weight in class_weights)
 
+        if "loss_weight" in values:
+            values["loss_weight"] = float(values["loss_weight"])
+
+        if "loss_name" in values:
+            values["loss_name"] = str(values["loss_name"])
+
         try:
-            values["name"] = str(values["name"])
-            values["num_classes"] = int(values["num_classes"])
-            if "loss_weight" in values:
-                values["loss_weight"] = float(values["loss_weight"])
-            if "loss_name" in values:
-                values["loss_name"] = str(values["loss_name"])
-            return cls(**values)
-        except KeyError as error:
-            raise ValueError(
-                f"Task configuration is missing required field {error.args[0]!r}: "
-                f"{config!r}."
-            ) from error
+            parsed[name] = SemanticTaskSpec(**values)
         except TypeError as error:
-            name = values.get("name", "<unnamed>")
             raise ValueError(
                 f"Invalid configuration for task {name!r}: {error}"
             ) from error
-
-
-def parse_task_specs(
-    tasks: Sequence[Mapping[str, Any]],
-) -> dict[str, SemanticTaskSpec]:
-    if not tasks:
-        raise ValueError("At least one semantic task must be configured.")
-    if isinstance(tasks, Mapping):
-        raise TypeError(
-            "tasks must be an explicit list of task configurations, not a "
-            "mapping keyed by task name."
-        )
-
-    parsed: dict[str, SemanticTaskSpec] = {}
-
-    for index, config in enumerate(tasks):
-        if not isinstance(config, Mapping):
-            raise TypeError(
-                f"tasks[{index}] must be a mapping, got {type(config).__name__}."
-            )
-
-        spec = SemanticTaskSpec.from_mapping(config)
-        if spec.name in parsed:
-            raise ValueError(f"Duplicate task name: {spec.name!r}.")
-        parsed[spec.name] = spec
 
     if not any(spec.loss_weight > 0 for spec in parsed.values()):
         raise ValueError("At least one task must have a positive loss weight.")
@@ -137,8 +109,21 @@ class TaskRoute:
 
 def build_criterion(
     spec: SemanticTaskSpec,
+    *,
+    num_classes: int,
     ignore_idx: int,
 ) -> nn.Module:
+    if num_classes < 2:
+        raise ValueError(
+            f"Task {spec.name!r}: network reports invalid num_classes={num_classes}."
+        )
+
+    if spec.class_weights is not None and len(spec.class_weights) != num_classes:
+        raise ValueError(
+            f"Task {spec.name!r}: network has {num_classes} classes, "
+            f"but {len(spec.class_weights)} class weights were provided."
+        )
+
     weight = (
         torch.tensor(spec.class_weights, dtype=torch.float32)
         if spec.class_weights is not None
@@ -166,8 +151,8 @@ class SemanticLightningModule(LightningModule):
     def __init__(
         self,
         *,
-        network: nn.Module,
-        tasks: list[dict[str, Any]],
+        network: SemanticSegmenter,
+        tasks: dict[str, Any],
         ignore_idx: int,
         img_size: tuple[int, int],
         freeze_encoder: bool,
@@ -188,24 +173,47 @@ class SemanticLightningModule(LightningModule):
         )
 
         self.task_specs = parse_task_specs(tasks)
-        self.eval_task_names = list(self.task_specs.keys())
+        self.eval_task_names = list(self.task_specs)
 
         self.ignore_idx = int(ignore_idx)
         self.poly_lr_decay_power = float(poly_lr_decay_power)
 
+        self.num_classes_by_task = {
+            task: int(num_classes)
+            for task, num_classes in self.network.num_classes_by_task.items()
+        }
+        self._validate_network_tasks()
+
         self.criteria = nn.ModuleDict(
             {
-                name: build_criterion(spec, self.ignore_idx)
-                for name, spec in self.task_specs.items()
+                task: build_criterion(
+                    spec,
+                    num_classes=self.num_classes_by_task[task],
+                    ignore_idx=self.ignore_idx,
+                )
+                for task, spec in self.task_specs.items()
             }
         )
 
         # TODO: add metric for position info
         self.iou_metrics, self.f1_metrics = self._make_metric_streams()
 
-    @property
-    def num_classes_by_task(self) -> dict[str, int]:
-        return {name: spec.num_classes for name, spec in self.task_specs.items()}
+    def _validate_network_tasks(self) -> None:
+        training_tasks = set(self.task_specs)
+        network_tasks = set(self.num_classes_by_task)
+
+        if training_tasks != network_tasks:
+            raise ValueError(
+                "Configured training tasks must exactly match the network heads: "
+                f"training={sorted(training_tasks)}, "
+                f"network={sorted(network_tasks)}."
+            )
+
+        for task, num_classes in self.num_classes_by_task.items():
+            if num_classes < 2:
+                raise ValueError(
+                    f"Network task {task!r} reports invalid num_classes={num_classes}."
+                )
 
     def forward(
         self,
@@ -273,7 +281,7 @@ class SemanticLightningModule(LightningModule):
         f1 = nn.ModuleList()
 
         for task in self.eval_task_names:
-            num_classes = self.task_specs[task].num_classes
+            num_classes = self.num_classes_by_task[task]
             iou.append(
                 MulticlassJaccardIndex(
                     num_classes=num_classes,
@@ -464,7 +472,9 @@ class SemanticLightningModule(LightningModule):
             )
 
         targets_subset = self._select_batch(targets, route)
-        target_maps = self.to_per_pixel_targets_semantic(targets, self.ignore_idx)
+        target_maps = self.to_per_pixel_targets_semantic(
+            targets_subset, self.ignore_idx
+        )
         target_tensor = torch.stack(target_maps).long().to(logits.device)
 
         return self.criteria[task](logits, target_tensor)
@@ -530,7 +540,7 @@ class SemanticLightningModule(LightningModule):
         predictions: dict[str, np.ndarray] = {}
         for task in expected_tasks:
             logits = logits_by_task[task]
-            expected_classes = self.task_specs[task].num_classes
+            expected_classes = self.num_classes_by_task[task]
             if logits.ndim != 3 or logits.shape[0] != expected_classes:
                 raise ValueError(
                     f"Task {task!r} diagnostic logits must have shape "

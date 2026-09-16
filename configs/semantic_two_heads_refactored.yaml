@@ -1,0 +1,90 @@
+trainer:
+  precision: "16-mixed"
+  max_steps: 40000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: pathseg-benchmark
+      group: ANORAK
+      job_type: baseline
+      tags:
+        - baseline
+        - 20x
+        - 896x896
+        - ANORAK+IGNITE
+        - multitask
+        - linear_decoder
+        - CustomTransforms
+        - h0-mini
+      save_dir: ./wandb
+      log_model: false
+model:
+  class_path: pathseg.training.semantic.SemanticTraining
+  init_args:
+    network:
+      class_path: pathseg.models.architectures.two_head_linear.IgniteAnorakLinearSegmenter
+      init_args:
+        encoder_id: h0-mini
+        img_size: [896, 896]
+
+        ignite_num_classes: 16
+        anorak_num_classes: 7
+
+        random_weights: false
+        sub_norm: false
+        upsample_logits: true
+        interpolation_mode: bilinear
+    tasks:
+      ignite:
+        loss_name: cross_entropy_dice
+        loss_weight: 1.0
+        class_weights: null
+      anorak:
+        loss_name: cross_entropy_dice
+        loss_weight: 1.0
+        class_weights: null
+    tiler:
+      class_path: pathseg.training.tiler.GridPadTiler
+      init_args:
+        tile: 896
+        stride: 448
+        weighted_blend: true # or true
+        pad_mode: "replicate" # optional; nice for images
+        pad_value: 0.0
+    lr: 1.0e-4
+    weight_decay: 0.05
+    poly_lr_decay_power: 0.9
+    lr_multiplier_encoder: 0.1
+    freeze_encoder: false
+data:
+  class_path: pathseg.datasets.multitask.MultiTaskConcatDataModule
+  init_args:
+    datasets:
+      - name: IGNITE
+        task_name: ignite
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite
+        images_subdir: images
+        masks_subdir: masks_semantic
+        split_csv: metadata.csv
+        sampling_weight: 1.0
+        fold: 0
+      - name: ANORAK
+        task_name: anorak
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/anorak
+        images_subdir: images
+        masks_subdir: masks_semantic
+        split_csv: split.csv
+        sampling_weight: 1.0
+        fold: 0
+    img_size: [896, 896]
+    prefetch_factor: 4
+    num_workers: 0
+    batch_size: 16
+    transforms:
+      class_path: pathseg.datasets.transforms.CustomTransforms
+      init_args:
+        img_size: [896, 896]
+        scale_range: [0.7, 1.4]

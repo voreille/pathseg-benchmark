@@ -1,16 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import torch
 
-from pathseg.models.builders import build_tiler
-from pathseg.models.builders_semantic import build_semantic_segmenter
-from pathseg.training.semantic_common import (
-    SemanticLightningModule,
-    parse_task_specs,
-)
+from pathseg.models.semantic_segmenter import SemanticSegmenter
+from pathseg.training.semantic_common import SemanticLightningModule
 
 
 class SemanticTraining(SemanticLightningModule):
@@ -26,40 +21,17 @@ class SemanticTraining(SemanticLightningModule):
 
     def __init__(
         self,
-        encoder_class_path: str,
-        decoder_name: str,
-        tasks: list[dict[str, Any]],
+        network: SemanticSegmenter,
+        tasks: dict[str, Any],
         ignore_idx: int,
         img_size: tuple[int, int],
-        encoder_init_args: dict[str, Any] | None = None,
-        decoder_init_args: dict[str, Any] | None = None,
-        tiler_name: str | None = None,
-        tiler_init_args: dict[str, Any] | None = None,
+        tiler: None,
         lr: float = 1e-4,
         weight_decay: float = 0.05,
         poly_lr_decay_power: float = 0.9,
         lr_multiplier_encoder: float = 0.1,
         freeze_encoder: bool = False,
-        upsample_logits: bool = False,
-        interpolation_mode: str = "bilinear",
     ) -> None:
-        task_specs = parse_task_specs(tasks)
-        network = build_semantic_segmenter(
-            encoder_class_path=encoder_class_path,
-            encoder_init_args=encoder_init_args,
-            decoder_name=decoder_name,
-            decoder_init_args=decoder_init_args,
-            num_classes_by_task={
-                name: spec.num_classes for name, spec in task_specs.items()
-            },
-            upsample_logits=upsample_logits,
-            interpolation_mode=interpolation_mode,
-        )
-        tiler = build_tiler(
-            tiler_name=tiler_name,
-            tiler_init_args=tiler_init_args,
-        )
-
         super().__init__(
             network=network,
             tasks=tasks,
@@ -72,6 +44,7 @@ class SemanticTraining(SemanticLightningModule):
             poly_lr_decay_power=poly_lr_decay_power,
             tiler=tiler,
         )
+
         self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):
