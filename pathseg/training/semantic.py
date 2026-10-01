@@ -45,6 +45,7 @@ class SemanticTraining(SemanticLightningModule):
             tiler=tiler,
         )
 
+        # self.save_hyperparameters(ignore=["network"])
         self.save_hyperparameters()
 
     def training_step(self, batch, batch_idx):

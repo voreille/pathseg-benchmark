@@ -6,10 +6,10 @@ import torch.nn.functional as F
 
 from pathseg.models.encoder import Encoder
 from pathseg.models.refiner_layers import (
-    ProtoProjLite,
     LayerNorm2d,
-    ProtoProjGN,
     ProtoProjDilatedSpatialScaleAttn,
+    ProtoProjGN,
+    ProtoProjLite,
     ProtoProjPSPAttention,
 )
 

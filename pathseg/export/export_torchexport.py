@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
 import torch
+import torch.nn as nn
 import yaml
 from lightning.pytorch import LightningModule
-from torch import nn
 
 
 class InferenceModel(nn.Module):
@@ -55,6 +56,35 @@ def load_training_module(
     )
 
 
+def assert_outputs_close(
+    eager_output,
+    exported_output,
+) -> None:
+    if isinstance(eager_output, Mapping):
+        if set(eager_output) != set(exported_output):
+            raise RuntimeError(
+                "Exported model returned different output heads: "
+                f"eager={sorted(eager_output)}, "
+                f"exported={sorted(exported_output)}."
+            )
+
+        for task in eager_output:
+            torch.testing.assert_close(
+                exported_output[task],
+                eager_output[task],
+                rtol=1e-4,
+                atol=1e-5,
+            )
+        return
+
+    torch.testing.assert_close(
+        exported_output,
+        eager_output,
+        rtol=1e-4,
+        atol=1e-5,
+    )
+
+
 def export_model(
     *,
     config_path: Path,
@@ -90,14 +120,38 @@ def export_model(
         dtype=torch.float32,
         device=device_obj,
     )
-    try:
-        scripted = torch.jit.script(model)
-    except Exception:
-        with torch.inference_mode():
-            scripted = torch.jit.trace(model, example, strict=False)
-            scripted = torch.jit.freeze(scripted)
 
-    scripted.save(out_path)  # e.g. "network_scripted.pt"
+    dynamic_shapes = None
+    if max_batch_size > 1:
+        batch = torch.export.Dim(
+            "batch",
+            min=1,
+            max=max_batch_size,
+        )
+        dynamic_shapes = {
+            "x": {0: batch},
+        }
+
+    with torch.inference_mode():
+        exported = torch.export.export(
+            model,
+            args=(example,),
+            dynamic_shapes=dynamic_shapes,
+            strict=False,
+        )
+
+        # Sanity check before serialization.
+        eager_output = model(example)
+        exported_output = exported.module()(example)
+        assert_outputs_close(
+            eager_output,
+            exported_output,
+        )
+
+    torch.export.save(
+        exported,
+        out_path,
+    )
 
 
 @click.command()
@@ -127,7 +181,7 @@ def export_model(
         dir_okay=False,
         path_type=Path,
     ),
-    default=Path("model.pt"),
+    default=Path("model.pt2"),
     show_default=True,
     help="Path to save the exported PyTorch model.",
 )
