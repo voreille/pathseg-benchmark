@@ -13,6 +13,12 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from pathseg.models.semantic_segmenter import (
+    FeatureMaps,
+    SemanticLogits,
+    SemanticSegmenter,
+)
+
 
 class BackboneNCA(nn.Module):
     """One NCA level: upstream ``BackboneNCA`` (perception) + ``BasicNCA`` (update).
@@ -210,3 +216,91 @@ class MedNCAEncoder(nn.Module):
     def forward_feature_maps(self, imgs: torch.Tensor) -> tuple[torch.Tensor]:
         state = self.forward_state(imgs)
         return (state.permute(0, 3, 1, 2),)
+
+
+class StateSliceDecoder(nn.Module):
+    """Parameter-free decoder reading each task's logits from the NCA state.
+
+    Output channels follow the image channels, one contiguous block per task in
+    ``num_classes_by_task`` order. Task selection mirrors ``MultiTaskDecoder``.
+    """
+
+    def __init__(
+        self,
+        num_classes_by_task: dict[str, int],
+        *,
+        input_channels: int = 3,
+    ) -> None:
+        super().__init__()
+        if not num_classes_by_task:
+            raise ValueError("num_classes_by_task must contain at least one task.")
+
+        self._num_classes_by_task = {
+            task: int(num_classes) for task, num_classes in num_classes_by_task.items()
+        }
+        self.input_channels = int(input_channels)
+
+        self.slices: dict[str, slice] = {}
+        start = self.input_channels
+        for task, num_classes in self._num_classes_by_task.items():
+            self.slices[task] = slice(start, start + num_classes)
+            start += num_classes
+
+    @property
+    def num_classes_by_task(self) -> dict[str, int]:
+        return dict(self._num_classes_by_task)
+
+    @property
+    def output_channels(self) -> int:
+        return sum(self._num_classes_by_task.values())
+
+    def forward(
+        self,
+        feature_maps: FeatureMaps,
+        task: str | None = None,
+    ) -> SemanticLogits:
+        state = feature_maps[-1]
+
+        if task is not None:
+            if task not in self.slices:
+                raise KeyError(
+                    f"Unknown task {task!r}. Available tasks: {list(self.slices)}."
+                )
+
+            return {
+                task: state[:, self.slices[task]],
+            }
+
+        return {name: state[:, task_slice] for name, task_slice in self.slices.items()}
+
+
+class MedNCASegmenter(SemanticSegmenter):
+    """Med-NCA whose output state channels are the semantic logits."""
+
+    def __init__(
+        self,
+        num_classes_by_task: dict[str, int],
+        *,
+        channel_n: int = 64,
+        hidden_size: int = 128,
+        steps: int = 64,
+        fire_rate: float = 0.5,
+        scale_factor: int = 4,
+    ) -> None:
+        decoder = StateSliceDecoder(num_classes_by_task, input_channels=3)
+
+        encoder = MedNCAEncoder(
+            output_channels=decoder.output_channels,
+            channel_n=channel_n,
+            hidden_size=hidden_size,
+            steps=steps,
+            fire_rate=fire_rate,
+            scale_factor=scale_factor,
+            input_channels=decoder.input_channels,
+        )
+
+        super().__init__(
+            encoder=encoder,
+            decoder=decoder,
+            upsample_logits=False,
+        )

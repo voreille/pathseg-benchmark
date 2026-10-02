@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
-from pathseg.models.architectures.med_nca import MedNCAEncoder
+from pathseg.models.architectures.med_nca import (
+    MedNCAEncoder,
+    MedNCASegmenter,
+    StateSliceDecoder,
+)
 
 
 def randomize_(module: torch.nn.Module, seed: int = 0) -> None:
@@ -66,3 +71,60 @@ def test_downscale_and_upscale_sizes():
     state = encoder.init_state(xd)
     assert state.shape == (1, 112, 112, 24)
     assert encoder.upscale_state(state, x.shape[-2:]).shape == (1, 448, 448, 24)
+
+
+def test_segmenter_single_task_output_and_param_count():
+    network = MedNCASegmenter({"ignite": 16}, steps=2)
+    num_parameters = sum(parameter.numel() for parameter in network.parameters())
+    print(f"MedNCASegmenter(channel_n=64, hidden_size=128) parameters: {num_parameters}")
+
+    # 2 levels x (2 * (64*64*9 + 64) + 192*128 + 128 + 128*64)
+    assert num_parameters == 213_504
+    assert sum(p.numel() for p in network.decoder.parameters()) == 0
+    assert network.upsample_logits is False
+    assert network.num_classes_by_task == {"ignite": 16}
+
+    for mode in (network.train, network.eval):
+        mode()
+        with torch.no_grad():
+            output = network(torch.rand(2, 3, 32, 32))
+        assert set(output) == {"ignite"}
+        assert output["ignite"].shape == (2, 16, 32, 32)
+
+    with torch.no_grad():
+        assert set(network(torch.rand(1, 3, 32, 32), task="ignite")) == {"ignite"}
+
+
+def test_decoder_task_selection_mirrors_multitask_decoder():
+    decoder = StateSliceDecoder({"ignite": 16, "anorak": 7})
+    state = torch.arange(30.0).view(1, 30, 1, 1).expand(2, 30, 4, 5)
+
+    all_tasks = decoder((state,))
+    assert list(all_tasks) == ["ignite", "anorak"]
+    torch.testing.assert_close(all_tasks["ignite"], state[:, 3:19])
+    torch.testing.assert_close(all_tasks["anorak"], state[:, 19:26])
+
+    selected = decoder((state,), task="anorak")
+    assert list(selected) == ["anorak"]
+    torch.testing.assert_close(selected["anorak"], state[:, 19:26])
+
+    with pytest.raises(KeyError, match="Unknown task"):
+        decoder((state,), task="bcss")
+
+
+def test_segmenter_multitask_channels():
+    network = MedNCASegmenter({"ignite": 16, "anorak": 7}, channel_n=96, steps=1)
+    assert network.encoder.channel_n == 96
+    assert network.encoder.output_channels == 23
+
+    with torch.no_grad():
+        output = network(torch.rand(1, 3, 16, 16))
+    assert {task: tuple(logits.shape) for task, logits in output.items()} == {
+        "ignite": (1, 16, 16, 16),
+        "anorak": (1, 7, 16, 16),
+    }
+
+
+def test_segmenter_rejects_too_few_channels():
+    with pytest.raises(ValueError, match="channel_n"):
+        MedNCASegmenter({"ignite": 16}, channel_n=18)
