@@ -12,6 +12,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from pathseg.models.semantic_segmenter import (
     FeatureMaps,
@@ -108,6 +109,11 @@ class MedNCAEncoder(nn.Module):
     Stochastic firing is kept at inference with the training fire rate. In eval
     mode, ``forward_feature_maps`` returns the mean state of ``n_eval_runs``
     passes (``n_eval_runs=1`` is upstream's single pass).
+
+    ``set_grad_checkpointing(every)`` recomputes chunks of ``every`` NCA steps
+    in the backward pass. It is only active in training mode with grad enabled
+    and does not change the computed function (fire masks are replayed through
+    the preserved RNG state).
     """
 
     level_names = ("coarse", "fine")
@@ -122,6 +128,7 @@ class MedNCAEncoder(nn.Module):
         fire_rate: float = 0.5,
         scale_factor: int = 4,
         n_eval_runs: int = 1,
+        grad_checkpointing_every: int | None = None,
         input_channels: int = 3,
     ) -> None:
         super().__init__()
@@ -155,6 +162,15 @@ class MedNCAEncoder(nn.Module):
                 for name in self.level_names
             }
         )
+
+        self.grad_checkpointing_every: int | None = None
+        self.set_grad_checkpointing(grad_checkpointing_every)
+
+    def set_grad_checkpointing(self, every: int | None = None) -> None:
+        """Checkpoint every ``every`` NCA steps in training; ``None`` disables."""
+        if every is not None and every < 1:
+            raise ValueError(f"Checkpointing interval must be positive, got {every}.")
+        self.grad_checkpointing_every = None if every is None else int(every)
 
     def downscale(self, imgs: torch.Tensor) -> torch.Tensor:
         """``B x 3 x H x W`` -> ``B x 3 x H/s x W/s`` (linear, no antialiasing).
@@ -212,7 +228,18 @@ class MedNCAEncoder(nn.Module):
             (imgs.permute(0, 2, 3, 1), state[..., self.input_channels :]),
             3,
         )
-        return self.levels[level](state, steps=self.steps)
+        nca = self.levels[level]
+
+        every = self.grad_checkpointing_every
+        if every is None or not (self.training and torch.is_grad_enabled()):
+            return nca(state, steps=self.steps)
+
+        remaining = self.steps
+        while remaining > 0:
+            chunk = min(every, remaining)
+            state = checkpoint(nca, state, chunk, use_reentrant=False)
+            remaining -= chunk
+        return state
 
     def forward_state(self, imgs: torch.Tensor) -> torch.Tensor:
         """One stochastic pass; returns the channels-last fine-level state."""
@@ -299,6 +326,7 @@ class MedNCASegmenter(SemanticSegmenter):
         fire_rate: float = 0.5,
         scale_factor: int = 4,
         n_eval_runs: int = 1,
+        grad_checkpointing_every: int | None = None,
     ) -> None:
         decoder = StateSliceDecoder(num_classes_by_task, input_channels=3)
 
@@ -310,6 +338,7 @@ class MedNCASegmenter(SemanticSegmenter):
             fire_rate=fire_rate,
             scale_factor=scale_factor,
             n_eval_runs=n_eval_runs,
+            grad_checkpointing_every=grad_checkpointing_every,
             input_channels=decoder.input_channels,
         )
 

@@ -103,6 +103,62 @@ def test_train_mode_runs_a_single_pass():
     torch.testing.assert_close(output, expected, rtol=0.0, atol=0.0)
 
 
+def count_updates(encoder: MedNCAEncoder) -> list[int]:
+    calls = [0]
+
+    def hook(_module, _inputs):
+        calls[0] += 1
+
+    for level in encoder.levels.values():
+        level.fc0.register_forward_pre_hook(hook)
+    return calls
+
+
+def forward_backward(encoder: MedNCAEncoder, x: torch.Tensor):
+    encoder.zero_grad(set_to_none=True)
+    torch.manual_seed(0)
+    (state,) = encoder.forward_feature_maps(x)
+    state.square().mean().backward()
+    grads = {name: p.grad.clone() for name, p in encoder.named_parameters()}
+    return state.detach(), grads
+
+
+def test_grad_checkpointing_preserves_outputs_and_gradients():
+    encoder = make_encoder(steps=7).train()
+    calls = count_updates(encoder)
+    x = torch.rand(2, 3, 16, 24)
+
+    expected_state, expected_grads = forward_backward(encoder, x)
+    assert calls[0] == 2 * 7
+
+    calls[0] = 0
+    encoder.set_grad_checkpointing(3)  # chunks of 3, 3, 1 steps
+    state, grads = forward_backward(encoder, x)
+    assert calls[0] == 2 * 2 * 7  # every step is recomputed in backward
+
+    torch.testing.assert_close(state, expected_state, rtol=0.0, atol=0.0)
+    assert grads.keys() == expected_grads.keys()
+    for name, grad in grads.items():
+        assert grad.abs().sum() > 0, name
+        torch.testing.assert_close(grad, expected_grads[name], rtol=1e-6, atol=1e-7)
+
+
+def test_grad_checkpointing_inactive_in_eval_and_no_grad():
+    encoder = make_encoder(steps=4, grad_checkpointing_every=1)
+    calls = count_updates(encoder)
+    x = torch.rand(1, 3, 16, 16)
+
+    encoder.eval()
+    encoder.forward_feature_maps(x)
+    assert calls[0] == 2 * 4
+
+    calls[0] = 0
+    encoder.train()
+    with torch.no_grad():
+        encoder.forward_feature_maps(x)
+    assert calls[0] == 2 * 4
+
+
 def test_segmenter_single_task_output_and_param_count():
     network = MedNCASegmenter({"ignite": 16}, steps=2)
     num_parameters = sum(parameter.numel() for parameter in network.parameters())
