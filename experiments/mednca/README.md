@@ -81,6 +81,18 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
 | wandb tags | `linear_decoder`, `h0-mini`, `896x896`, `ANORAK+IGNITE`, `multitask` | `med_nca`, `448x448`, `IGNITE` | |
 | `img_size` (data + transforms), tiler `tile`/`stride` | 896 / 448 | 448 / 224 | Memory: full-tile BPTT at 896² with batch 16 does not fit even with checkpointing. This halves the field of view per tile at 0.5 µm/px. |
 
+### Notes for running
+
+- `pathseg fit` wraps the module in `torch.compile` unless `--no_compile` is
+  passed. Compiling would unroll 2 × 64 NCA steps (with checkpoint regions), so
+  compile time and benefit are untested on GPU. Until they are measured, run
+  with `--no_compile`.
+- Validation passes all tiles of an image through the network in one call
+  (`eval_step` → `self(crops)`). IGNITE ROIs reach about 2800 × 2200 px, which is
+  up to about 120 tiles of 448. Under `no_grad`, one 64-channel fp32 state for
+  120 tiles is about 6 GB, with several times that transient per step. Watch
+  validation memory on the target GPU.
+
 ## Results
 
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |
