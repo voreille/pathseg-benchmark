@@ -89,3 +89,124 @@ class BackboneNCA(nn.Module):
                 3,
             )
         return x
+
+
+class MedNCAEncoder(nn.Module):
+    """Two-level Med-NCA (upstream ``Agent_Med_NCA.get_outputs``, inference path).
+
+    The coarse level runs on the image downscaled by ``scale_factor``. Its state
+    is upscaled (nearest) to the input size, the full-resolution image is
+    re-injected, and the fine level runs. The stages are public so training
+    code can recombine them; stage states are channels-last (upstream layout).
+    """
+
+    level_names = ("coarse", "fine")
+
+    def __init__(
+        self,
+        output_channels: int,
+        *,
+        channel_n: int = 64,
+        hidden_size: int = 128,
+        steps: int = 64,
+        fire_rate: float = 0.5,
+        scale_factor: int = 4,
+        input_channels: int = 3,
+    ) -> None:
+        super().__init__()
+        if channel_n < input_channels + output_channels:
+            raise ValueError(
+                f"channel_n={channel_n} cannot hold {input_channels} image and "
+                f"{output_channels} output channels."
+            )
+        if steps < 1:
+            raise ValueError(f"steps must be positive, got {steps}.")
+        if scale_factor < 1:
+            raise ValueError(f"scale_factor must be positive, got {scale_factor}.")
+
+        self.channel_n = int(channel_n)
+        self.input_channels = int(input_channels)
+        self.output_channels = int(output_channels)
+        self.steps = int(steps)
+        self.scale_factor = int(scale_factor)
+
+        self.levels = nn.ModuleDict(
+            {
+                name: BackboneNCA(
+                    self.channel_n,
+                    fire_rate=fire_rate,
+                    hidden_size=hidden_size,
+                    input_channels=self.input_channels,
+                )
+                for name in self.level_names
+            }
+        )
+
+    def downscale(self, imgs: torch.Tensor) -> torch.Tensor:
+        """``B x 3 x H x W`` -> ``B x 3 x H/s x W/s`` (linear, no antialiasing).
+
+        Samples the same positions as upstream's ``torchio.Resize``.
+        """
+        size = (
+            imgs.shape[-2] // self.scale_factor,
+            imgs.shape[-1] // self.scale_factor,
+        )
+        return F.interpolate(
+            imgs,
+            size=size,
+            mode="bilinear",
+            align_corners=False,
+            antialias=False,
+        )
+
+    def init_state(self, imgs: torch.Tensor) -> torch.Tensor:
+        """Seed: zeros with the image in the first channels, ``B x H x W x C``."""
+        batch, _, height, width = imgs.shape
+        state = imgs.new_zeros((batch, height, width, self.channel_n))
+        state[..., : self.input_channels] = imgs.permute(0, 2, 3, 1)
+        return state
+
+    def upscale_state(
+        self,
+        state: torch.Tensor,
+        size: tuple[int, int] | torch.Size,
+    ) -> torch.Tensor:
+        """Nearest-neighbour upscaling of a channels-last state to ``size``."""
+        upscaled = F.interpolate(
+            state.permute(0, 3, 1, 2),
+            size=tuple(size),
+            mode="nearest",
+        )
+        return upscaled.permute(0, 2, 3, 1)
+
+    def run_level(
+        self,
+        level: str,
+        state: torch.Tensor,
+        imgs: torch.Tensor,
+    ) -> torch.Tensor:
+        """Re-inject ``imgs`` and run ``level`` for ``steps`` steps."""
+        if level not in self.levels:
+            raise KeyError(f"Unknown level {level!r}. Available: {list(self.levels)}.")
+        if tuple(imgs.shape[-2:]) != tuple(state.shape[1:3]):
+            raise ValueError(
+                f"Image size {tuple(imgs.shape[-2:])} does not match state size "
+                f"{tuple(state.shape[1:3])}."
+            )
+
+        state = torch.cat(
+            (imgs.permute(0, 2, 3, 1), state[..., self.input_channels :]),
+            3,
+        )
+        return self.levels[level](state, steps=self.steps)
+
+    def forward_state(self, imgs: torch.Tensor) -> torch.Tensor:
+        """One stochastic pass; returns the channels-last fine-level state."""
+        small_imgs = self.downscale(imgs)
+        state = self.run_level("coarse", self.init_state(small_imgs), small_imgs)
+        state = self.upscale_state(state, imgs.shape[-2:])
+        return self.run_level("fine", state, imgs)
+
+    def forward_feature_maps(self, imgs: torch.Tensor) -> tuple[torch.Tensor]:
+        state = self.forward_state(imgs)
+        return (state.permute(0, 3, 1, 2),)
