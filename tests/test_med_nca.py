@@ -73,6 +73,36 @@ def test_downscale_and_upscale_sizes():
     assert encoder.upscale_state(state, x.shape[-2:]).shape == (1, 448, 448, 24)
 
 
+def test_eval_mode_averages_n_eval_runs_passes():
+    encoder = make_encoder(n_eval_runs=3)
+    x = torch.rand(2, 3, 16, 24)
+
+    encoder.eval()
+    torch.manual_seed(0)
+    with torch.no_grad():
+        (averaged,) = encoder.forward_feature_maps(x)
+
+    torch.manual_seed(0)
+    with torch.no_grad():
+        passes = [encoder.forward_state(x) for _ in range(3)]
+    expected = torch.stack(passes).mean(dim=0).permute(0, 3, 1, 2)
+
+    torch.testing.assert_close(averaged, expected, rtol=1e-6, atol=1e-6)
+    assert not torch.equal(passes[0], passes[1])
+
+
+def test_train_mode_runs_a_single_pass():
+    encoder = make_encoder(n_eval_runs=3).train()
+    x = torch.rand(1, 3, 16, 16)
+
+    torch.manual_seed(0)
+    (output,) = encoder.forward_feature_maps(x)
+    torch.manual_seed(0)
+    expected = encoder.forward_state(x).permute(0, 3, 1, 2)
+
+    torch.testing.assert_close(output, expected, rtol=0.0, atol=0.0)
+
+
 def test_segmenter_single_task_output_and_param_count():
     network = MedNCASegmenter({"ignite": 16}, steps=2)
     num_parameters = sum(parameter.numel() for parameter in network.parameters())

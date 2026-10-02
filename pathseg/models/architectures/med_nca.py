@@ -104,6 +104,10 @@ class MedNCAEncoder(nn.Module):
     is upscaled (nearest) to the input size, the full-resolution image is
     re-injected, and the fine level runs. The stages are public so training
     code can recombine them; stage states are channels-last (upstream layout).
+
+    Stochastic firing is kept at inference with the training fire rate. In eval
+    mode, ``forward_feature_maps`` returns the mean state of ``n_eval_runs``
+    passes (``n_eval_runs=1`` is upstream's single pass).
     """
 
     level_names = ("coarse", "fine")
@@ -117,6 +121,7 @@ class MedNCAEncoder(nn.Module):
         steps: int = 64,
         fire_rate: float = 0.5,
         scale_factor: int = 4,
+        n_eval_runs: int = 1,
         input_channels: int = 3,
     ) -> None:
         super().__init__()
@@ -129,12 +134,15 @@ class MedNCAEncoder(nn.Module):
             raise ValueError(f"steps must be positive, got {steps}.")
         if scale_factor < 1:
             raise ValueError(f"scale_factor must be positive, got {scale_factor}.")
+        if n_eval_runs < 1:
+            raise ValueError(f"n_eval_runs must be positive, got {n_eval_runs}.")
 
         self.channel_n = int(channel_n)
         self.input_channels = int(input_channels)
         self.output_channels = int(output_channels)
         self.steps = int(steps)
         self.scale_factor = int(scale_factor)
+        self.n_eval_runs = int(n_eval_runs)
 
         self.levels = nn.ModuleDict(
             {
@@ -215,6 +223,10 @@ class MedNCAEncoder(nn.Module):
 
     def forward_feature_maps(self, imgs: torch.Tensor) -> tuple[torch.Tensor]:
         state = self.forward_state(imgs)
+        if not self.training and self.n_eval_runs > 1:
+            for _ in range(self.n_eval_runs - 1):
+                state = state + self.forward_state(imgs)
+            state = state / self.n_eval_runs
         return (state.permute(0, 3, 1, 2),)
 
 
@@ -286,6 +298,7 @@ class MedNCASegmenter(SemanticSegmenter):
         steps: int = 64,
         fire_rate: float = 0.5,
         scale_factor: int = 4,
+        n_eval_runs: int = 1,
     ) -> None:
         decoder = StateSliceDecoder(num_classes_by_task, input_channels=3)
 
@@ -296,6 +309,7 @@ class MedNCASegmenter(SemanticSegmenter):
             steps=steps,
             fire_rate=fire_rate,
             scale_factor=scale_factor,
+            n_eval_runs=n_eval_runs,
             input_channels=decoder.input_channels,
         )
 
