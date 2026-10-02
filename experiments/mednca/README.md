@@ -93,6 +93,22 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
   120 tiles is about 6 GB, with several times that transient per step. Watch
   validation memory on the target GPU.
 
+## Sanity checks (CLAUDE.md)
+
+| # | Check | Status |
+|---|---|---|
+| 1 | Unit: `{"ignite": B×16×T×T}`, no upsampling, param count | Pass (`tests/test_med_nca.py`): 213,504 parameters, decoder has none |
+| 2 | Parity vs upstream (`tests/test_med_nca_parity.py`) | Pass (CPU): single level exact to 1e-6; two-level chain to 1e-5 (float round-off); seeded init identical; downscale matches `torchio.Resize` |
+| 3 | `fast_dev_run` through LightningCLI with the real config | Pass on CPU with `steps=2`: `fit` (train + val) and `validate` (448/224 tiler, `n_eval_runs=2`, stitch, metrics) |
+| 4 | Overfit one batch | CPU, reduced setup (128 px tiles, `steps=16`, batch 2, fixed batch with ≥4 classes per sample, real `routed_forward` + `cross_entropy_dice`). lr 5e-4: loss 3.70 → 0.13–0.17, pixel accuracy 0.07 → 0.97 in 1500 iterations. It flattens there rather than reaching 0; the cause (fire-mask noise in each pass, capacity at 16 steps) is untested. lr 2e-3 learns but has loss spikes. Not yet repeated at full size on GPU. |
+| 5 | Peak GPU memory at the target tile | TODO on GPU: `python experiments/mednca/probe_memory.py --tile 448 --batch-sizes 16` |
+| 6 | Stage composition = `forward_feature_maps` | Pass (exact, train mode, fixed seed) |
+| 7 | Grad checkpointing on vs off | Pass: identical outputs and gradients, recomputation verified |
+
+`overfit_batches=1` in Lightning is not a fixed batch with this datamodule
+(`WeightedRandomSampler` + random augmentations), so check 4 uses a direct loop
+over one fixed batch.
+
 ## Results
 
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |
