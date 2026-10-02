@@ -78,8 +78,13 @@ class BackboneNCA(nn.Module):
         dx = self.perceive(x.transpose(1, 3)).transpose(1, 3)
         dx = self.fc1(F.relu(self.fc0(dx)))
 
-        stochastic = torch.rand([dx.size(0), dx.size(1), dx.size(2), 1]) > fire_rate
-        dx = dx * stochastic.float().to(dx.device)
+        # Deviation: upstream draws the mask on the CPU generator and copies it
+        # to the device. Same distribution; identical to upstream on CPU.
+        stochastic = (
+            torch.rand([dx.size(0), dx.size(1), dx.size(2), 1], device=dx.device)
+            > fire_rate
+        )
+        dx = dx * stochastic.float()
 
         return x + dx
 
