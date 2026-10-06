@@ -1,0 +1,88 @@
+# Med-NCA, IGNITE single task, Variant B (the authors' training recipe).
+# Copied from configs/mednca/ignite_mednca.yaml (Variant A). Differences: the
+# training module (fine level on random crops, upstream Dice+BCE, Adam +
+# ExponentialLR), channel_n, batch size and wandb tags. Evaluation (tiler,
+# metrics) is unchanged. Logged in experiments/mednca/README.md ("Variant B").
+trainer:
+  precision: "bf16-mixed" # NCA iterates many steps; fp16 can diverge. Use "32-true" without bf16.
+  max_steps: 40000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: pathseg-benchmark
+      group: IGNITE
+      job_type: baseline
+      tags:
+        - baseline
+        - 20x
+        - 448x448
+        - IGNITE
+        - med_nca
+        - variant_b
+        - upstream_recipe
+        - CustomTransforms
+      save_dir: ./wandb
+      log_model: false
+model:
+  class_path: pathseg.training.med_nca.MedNCATraining
+  init_args:
+    network:
+      class_path: pathseg.models.architectures.med_nca.MedNCASegmenter
+      init_args:
+        num_classes_by_task:
+          ignite: 16
+        channel_n: 48 # 3 image + 16 output + 29 hidden (upstream notebook: 30 hidden)
+        hidden_size: 128
+        steps: 64
+        fire_rate: 0.5
+        scale_factor: 4
+        n_eval_runs: 1
+        grad_checkpointing_every: null # fine level runs on crops: fits without checkpointing
+        max_batch_size: 32 # caps tiles per forward; validation sends all tiles of an ROI at once
+        compile_step: true # torch.compile the NCA step in CUDA training (~1 min compile); run with --no_compile
+    tasks:
+      ignite:
+        loss_name: cross_entropy_dice
+        loss_weight: 1.0
+        class_weights: null
+    tiler:
+      class_path: pathseg.training.tiler.GridPadTiler
+      init_args:
+        tile: 448
+        stride: 224
+        weighted_blend: true # or true
+        pad_mode: "replicate" # optional; nice for images
+        pad_value: 0.0
+    # Upstream recipe (Agent.initialize / Agent_Multi_NCA.batch_step):
+    crop_size: null # fine-level crop = coarse size (448 / 4 = 112), as upstream
+    loss: upstream_dice_bce # per-class sigmoid Dice + BCE, summed over present classes
+    upstream_optimizer: true # Adam + ExponentialLR stepped every batch
+    lr: 1.6e-3
+    betas: [0.5, 0.5]
+    lr_gamma: 0.9999
+    weight_decay: 0.0
+    freeze_encoder: false
+data:
+  class_path: pathseg.datasets.multitask.MultiTaskConcatDataModule
+  init_args:
+    datasets:
+      - name: IGNITE
+        task_name: ignite
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite
+        images_subdir: images
+        masks_subdir: masks_semantic
+        split_csv: metadata.csv
+        sampling_weight: 1.0
+        fold: 0
+    img_size: [448, 448]
+    prefetch_factor: 4
+    num_workers: 0
+    batch_size: 20 # upstream notebook
+    transforms:
+      class_path: pathseg.datasets.transforms.CustomTransforms
+      init_args:
+        img_size: [448, 448]
+        scale_range: [0.7, 1.4]
