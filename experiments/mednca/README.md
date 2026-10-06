@@ -64,6 +64,8 @@ The allowed adaptations are listed in `CLAUDE.md`.
 | 8 | The fine level runs on the whole tile in training (Variant A), not on a random crop | Benchmark protocol. The crop recipe is Variant B, in a training module only. |
 | 9 | Input = RGB / 255 in [0, 1], with no z-norm | Shared benchmark pipeline. The range is comparable to upstream's [0, 1] rescale. |
 | 10 | `max_batch_size` (default off; 32 in the IGNITE config): `forward_feature_maps` splits larger inputs into chunks and concatenates them. No cross-sample ops, so the function is unchanged; only the fire-mask draw order differs. Approved by the user (not on the CLAUDE.md list). | Validation sends all tiles of an ROI in one call, at about 0.57 GB per 448 px tile (no_grad, bf16, A100). Large ROIs ran out of memory. With the cap, 150 tiles peak at 23.4 GB. |
+| 11 | Implementation-level rewrites of the update step that compute the same function from the same `state_dict`: NHWC convs with spatially transposed kernels instead of `transpose(1, 3)`; `p0`/`p1`/`fc0` folded into one 3×3 conv; fused reflect pad + cast; cuDNN conv + bias + ReLU; fire mask applied in bf16. Upstream weights still load, and parity holds to float round-off (1e-5). See [Throughput](#throughput). | Training speed (CLAUDE.md "Current focus") |
+| 12 | `compile_step` (default off; `true` in the IGNITE config): in CUDA training only, each NCA step runs through `torch.compile`. The function is unchanged and the fire masks are still drawn eagerly. Approved by the user (not on the CLAUDE.md list). See [Compiled step](#compiled-step-compile_step). | Training speed |
 
 The parameter count at `channel_n = 64`, `hidden_size = 128` is 106,752 per level,
 so 213,504 in total. At `channel_n = 96` it is 430,720.
@@ -80,14 +82,18 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
 | tasks / datasets | IGNITE + ANORAK | IGNITE only | Single-task run |
 | wandb `group` | ANORAK | IGNITE | Single-task IGNITE run |
 | wandb tags | `linear_decoder`, `h0-mini`, `896x896`, `ANORAK+IGNITE`, `multitask` | `med_nca`, `448x448`, `IGNITE` | |
+| `network.init_args.compile_step` | (n/a) | `true` | `torch.compile` of the NCA step in CUDA training, 1.37× faster. Run with `--no_compile`. |
 | `img_size` (data + transforms), tiler `tile`/`stride` | 896 / 448 | 448 / 224 | Memory: full-tile BPTT at 896² with batch 16 does not fit even with checkpointing. This halves the field of view per tile at 0.5 µm/px. |
 
 ### Notes for running
 
-- `pathseg fit` wraps the module in `torch.compile` unless `--no_compile` is
-  passed. Compiling would unroll 2 × 64 NCA steps (with checkpoint regions), so
-  compile time and benefit are untested on GPU. Until they are measured, run
-  with `--no_compile`.
+- **Run `pathseg fit` with `--no_compile`.** Without it, `pathseg fit` wraps the whole
+  module in `torch.compile`, which would unroll 2 × 64 NCA steps (with checkpoint
+  regions); that is untested. Compilation is handled inside the network instead, by
+  `compile_step: true`, which compiles only the single-step update.
+- With `compile_step: true`, the first training step takes about 1 minute longer
+  (Inductor max-autotune, 2 graphs: coarse and fine level). Later runs reuse the Inductor
+  cache (`/tmp/torchinductor_$USER`). It needs a C compiler for Triton (gcc).
 - Validation passes all tiles of an image through the network in one call
   (`eval_step` → `self(crops)`). IGNITE ROIs reach about 2800 × 2200 px, which is
   about 120 tiles of 448. Measured on an A100 (no_grad, bf16-mixed, 64 steps):
@@ -99,12 +105,13 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
 | # | Check | Status |
 |---|---|---|
 | 1 | Unit: `{"ignite": B×16×T×T}`, no upsampling, param count | Pass (`tests/test_med_nca.py`): 213,504 parameters, decoder has none |
-| 2 | Parity vs upstream (`tests/test_med_nca_parity.py`) | Pass (CPU): single level exact to 1e-6; two-level chain to 1e-5 (float round-off); seeded init identical; downscale matches `torchio.Resize` |
+| 2 | Parity vs upstream (`tests/test_med_nca_parity.py`) | Pass (CPU): single level and two-level chain to 1e-5 (float round-off; it was 1e-6 for the single level before the throughput rewrites changed the summation order); seeded init identical; downscale matches `torchio.Resize` |
 | 3 | `fast_dev_run` through LightningCLI with the real config | Pass on CPU with `steps=2`: `fit` (train + val) and `validate` (448/224 tiler, `n_eval_runs=2`, stitch, metrics) |
 | 4 | Overfit one batch | CPU, reduced setup (128 px tiles, `steps=16`, batch 2, fixed batch with ≥4 classes per sample, real `routed_forward` + `cross_entropy_dice`). lr 5e-4: loss 3.70 → 0.13–0.17, pixel accuracy 0.07 → 0.97 in 1500 iterations. It flattens there rather than reaching 0; the cause (fire-mask noise in each pass, capacity at 16 steps) is untested. lr 2e-3 learns but has loss spikes. Not yet repeated at full size on GPU. |
 | 5 | Peak GPU memory at the target tile | TODO on GPU: `python experiments/mednca/probe_memory.py --tile 448 --batch-sizes 16` |
 | 6 | Stage composition = `forward_feature_maps` | Pass (exact, train mode, fixed seed) |
 | 7 | Grad checkpointing on vs off | Pass: identical outputs and gradients, recomputation verified |
+| – | Compiled step (`compile_step`) | Pass: plain-ops step = eager step (CPU, values + gradients); used only in CUDA training; compiled = eager on CUDA with checkpointing (`tests/test_med_nca.py`) |
 
 `overfit_batches=1` in Lightning is not a fixed batch with this datamodule
 (`WeightedRandomSampler` + random augmentations), so check 4 uses a direct loop
@@ -113,7 +120,13 @@ over one fixed batch.
 ## Throughput
 
 Measured with `experiments/mednca/profile_step.py`: one training step (forward,
-`cross_entropy_dice`, backward, AdamW), synthetic batch, no data loading.
+`cross_entropy_dice`, backward, AdamW), synthetic batch, no data loading. Add
+`--compile-step` to profile the compiled path.
+
+**Summary (A100, tile 448, batch 16, `every=8`, bf16): 12.63 → 1.52 s/iter (8.3×),
+0.079 → 0.656 it/s, peak memory 40.0 → 22.0 GB.** The model, `state_dict` and protocol
+are unchanged. About 6.0× came from eager rewrites of the step (layout, folding,
+fusion) and 1.37× more from `compile_step`.
 
 ### Baseline (2026-10-06, commit `ef68485`)
 
@@ -157,21 +170,54 @@ bf16-vs-fp32 gap.
 | pad | Reflect pad + bf16 cast as one autograd Function: one full copy forward and one backward, plus border strips. Replaces cast + 2 `cat`s forward and the strided accumulation adds in backward. Exactly equal to `F.pad(reflect)` (values and gradients). | 2.55 | 0.392 | 72.9 | 19.7 GB | 4.95× |
 | mask | Fire mask applied in bf16 (`dx * mask`, exact for a 0/1 mask) instead of upcasting `dx` to fp32 first | 2.47 | 0.404 | 75.2 | 19.7 GB | 5.11× |
 | conv-relu | Conv + bias + ReLU as one cuDNN kernel (`torch.cudnn_convolution_relu`) in an autograd Function with an explicit backward (`threshold_backward` + `convolution_backward`). Removes the separate bias-add and ReLU passes over the 128-channel hidden map. One bf16 rounding instead of two. Plain conv + ReLU off CUDA. Traces under `torch.compile(backend="aot_eager")` with identical results. | 2.09 | 0.479 | 89.1 | 19.5 GB | 6.05× |
+| compile | `compile_step: true`: `torch.compile` of a plain-ops step in CUDA training (see below) | 1.52 | 0.656 | 122.1 | 22.0 GB | 8.3× |
 
 Profile at `conv-relu` (2.06 s of device time): elementwise 35% (mixed fp32+bf16 residual
 add, mask multiplies, fp32 gradient accumulation, `threshold_backward`), conv 30%,
 GEMM (`fc1`) 12%, copies 10%, casts 9% (pad forward/backward). The conv + GEMM share
 rose from 11% to 42%. The rest is memory-bound pointwise work around the fp32 state. Eager
-mode can't fuse it further; the next candidate is `torch.compile` of `_nca_step` (the fire
-mask is already drawn outside it, so eager RNG and checkpoint replay are unaffected).
+mode can't fuse it further, which is what `compile_step` addresses.
+
+### Compiled step (`compile_step`)
+
+Code paths in `pathseg/models/architectures/med_nca.py`. `BackboneNCA.update` draws the
+fire mask eagerly and then calls one of two step functions with the same signature:
+
+| Path | Function | Used when |
+|---|---|---|
+| eager | `_nca_step` (hand-fused: `_ReflectPadCastHW`, `_CudnnConvBiasReLU`) | default; always in eval / `no_grad` / CPU |
+| compiled | `torch.compile(_nca_step_plain, dynamic=False, mode="max-autotune-no-cudagraphs")` | `compile_step=True` **and** training mode **and** grad enabled **and** CUDA |
+
+- `_nca_step_plain` is the same step in plain ops (cast, `cat` reflect pad, conv, ReLU,
+  `linear`, mask, residual). Inductor can't see inside the hand-fused autograd Functions.
+  Compiling `_nca_step` itself reached only 1.83 s/iter. With plain ops, max-autotune
+  fuses pad + cast into a Triton conv template, ReLU + mask + residual into the `fc1`
+  GEMM epilogue, and the backward pointwise ops.
+- The fire mask (`torch.rand`) stays outside the compiled region. Masks are therefore
+  identical to the eager path, and checkpoint recomputation replays them through the
+  preserved RNG state. Inductor's own RNG would draw different masks.
+- **`dynamic=False` is required.** With the default (automatic dynamic shapes), checkpoint
+  recomputation recompiled the step and failed with `CheckpointError: Recomputed values
+  ... have different metadata`. Training has two fixed shapes (coarse 112², fine 448²),
+  so two graphs are compiled.
+- Eval stays eager because validation sends varying chunk sizes (`max_batch_size`
+  remainders), and each new shape would recompile.
+- Equivalence vs the baseline on GPU: fp32 with TF32 off matches to 9e-8. bf16 outputs
+  differ by 1.2e-3 and gradients by 6.0e-3 (relative), against 1.0e-3 and 6.0e-3 for the
+  baseline's own bf16 vs fp32.
+- Measured variants (s/iter): eager 2.09; compiling `_nca_step` 1.92 (default mode) /
+  1.83 (max-autotune); compiling `_nca_step_plain` 1.70 (default mode) / **1.52**
+  (max-autotune, kept). Cold compile with max-autotune: about 66 s.
+- Profile with `--compile-step` (1.52 s device time): Triton templates (conv / `fc1` with
+  fused ops) 38%, Triton pointwise 32%, cuDNN conv backward (wgrad/dgrad) 23%, GEMM 3%.
 
 Tried and not kept:
 - `torch.addcmul(x, dx, mask)` for the masked residual: bit-identical but no faster
   (2.54 s/iter), because the mixed-dtype kernel is not vectorized and backward adds copies.
 - `cudnn.benchmark=True`: no gain (2.55 s/iter at the `pad` commit). With NHWC inputs,
   cuDNN's heuristics already pick the same kernels.
-- `torch.compile` of `_nca_step`: not measurable in the claude-box container, because
-  Triton needs a C compiler and none is installed there. To be measured on the host.
+- `torch.compile` with dynamic shapes, and compiling the hand-fused `_nca_step`: see
+  "Compiled step" above.
 
 ## Results
 

@@ -55,8 +55,10 @@ must contain:
     `self.training and torch.is_grad_enabled()` and does not change the computed
     function. Use `torch.utils.checkpoint(..., use_reentrant=False)` with the default
     `preserve_rng_state=True`, so the stochastic fire masks are identical in the
-    recomputation. This is the one training-motivated knob allowed in the
-    architecture, because it can't live outside the step loop. Default off.
+    recomputation. Training-motivated knobs are allowed in the architecture only
+    when they can't live outside the step loop and don't change the function. The
+    approved ones are this, `compile_step` (see "Training throughput"), and
+    `max_batch_size` (a memory cap for eval). All default off.
 - `StateSliceDecoder(nn.Module)`: no parameters. Maps the state to
   `{task: state[:, slice_for_task]}`.
   - Exposes `num_classes_by_task`.
@@ -136,7 +138,8 @@ Anything else: stop and ask.
 ## Required config deviations (keep these minimal and documented)
 - `network.class_path: pathseg.models.architectures.med_nca.MedNCASegmenter`, with
   `init_args` for: `num_classes_by_task`, `channel_n`, `hidden_size`, `steps`,
-  `fire_rate`, `scale_factor`, `n_eval_runs`, `grad_checkpointing_every`.
+  `fire_rate`, `scale_factor`, `n_eval_runs`, `grad_checkpointing_every`,
+  `max_batch_size`, `compile_step`.
 - `lr_multiplier_encoder: 1.0`. All Med-NCA parameters live in the encoder; the
   baseline's 0.1 would cripple it. `freeze_encoder: false`. Verify that
   `SemanticTraining` copes with a decoder that has no parameters (empty param group).
@@ -176,33 +179,63 @@ baseline config with only the changes above.
 ## Conventions
 - New files only. No edits to shared benchmark code; if one seems needed, stop and ask.
 - Respect the separation of concerns above. Nothing training-only goes into
-  `models.architectures`, apart from the grad-checkpointing switch.
+  `models.architectures`, apart from the approved switches (grad checkpointing,
+  `compile_step`, `max_batch_size`).
 - One adaptation per commit, clear messages.
 - Log every deviation from upstream and from the baseline config in
   `experiments/mednca/README.md`, plus a results table next to the ViT baselines.
 - Outputs (checkpoints, wandb) stay out of git.
 
-## Current focus: training throughput
-Variant A trains at ~0.07 it/s (448 px, batch 16, bf16, A100), versus 1.44 it/s for
-h0-mini + linear at 896 px. Per iteration Med-NCA needs only ~3× the FLOPs (~185 vs
-~63 TFLOP), but it reaches only ~13 TFLOP/s against ~90 for h0-mini. So most of the gap is
-implementation inefficiency, not model cost. Goal: speed up training **without changing
-the computed function**.
-- Profile before optimizing: `experiments/mednca/profile_step.py` (one training step,
-  top kernels, time per op category, achieved TFLOP/s). Record findings in the README.
-- Allowed: implementation-level rewrites that compute the same function. For example:
-  fold `p0`/`p1`/`fc0` into one 3×3 conv built from the existing weights; avoid the
-  layout copies caused by upstream's `transpose(1, 3)` (transposed kernels); `fc1` as a
-  1×1 conv; `cudnn.benchmark`; `torch.compile` of the single-step update.
+## Training throughput (done: 8.3×, 2026-10-06)
+Variant A started at 0.079 it/s (448 px, batch 16, bf16, A100), against 1.44 it/s for
+h0-mini + linear at 896 px. Per iteration Med-NCA needs only ~3× the FLOPs (~185 vs ~63
+TFLOP), so the gap was mostly implementation inefficiency. It now runs at **0.656 it/s
+(1.52 s/iter, 122 effective TFLOP/s, 22 GB peak)**, with the model, `state_dict` and
+protocol unchanged. Per-commit numbers, the profiles and the variants that failed are in
+`experiments/mednca/README.md` → "Throughput".
+
+How the step is implemented now (`pathseg/models/architectures/med_nca.py`):
+- The state stays channels-last `B×H×W×C`. Convs run on the free NHWC view with
+  spatially transposed kernels, which equals upstream's convs on `x.transpose(1, 3)`.
+- `BackboneNCA.folded_weights()` builds, once per `forward`, one 3×3 conv
+  (kernel + bias) from `p0`/`p1`/`fc0`, plus `fc1` with its image-channel rows zeroed
+  (so `dx = 0` there; this replaces the re-injection `cat`). The parameters themselves
+  are untouched.
+- `BackboneNCA.update` draws the fire mask **eagerly**, then calls one of two step
+  functions with the same signature:
+  - `_nca_step` (eager, hand-fused: `_ReflectPadCastHW`, `_CudnnConvBiasReLU`, mask
+    in bf16): the default, and always used in eval / `no_grad` / on CPU.
+  - `torch.compile(_nca_step_plain, dynamic=False, mode="max-autotune-no-cudagraphs")`:
+    used only when `compile_step=True` and in training mode with grad enabled on CUDA.
+    `_nca_step_plain` is the same step in plain ops, because Inductor can't fuse
+    through the hand-written autograd Functions. Keep the two in sync: a test checks
+    that they agree.
+
+Rules for further changes:
+- Profile before optimizing: `experiments/mednca/profile_step.py` (`--compile-step` for
+  the compiled path). Record findings in the README.
+- Allowed: implementation-level rewrites that compute the same function.
 - Constraints: keep parameter names and the state_dict, so checkpoints and upstream
-  weights still load. `tests/test_med_nca_parity.py` and the checkpointing/composition
-  tests must still pass (to float tolerance). One optimization per commit, with its
-  measured speedup.
+  weights still load. `tests/test_med_nca_parity.py` (1e-5) and `tests/test_med_nca.py`
+  (checkpointing, composition, compiled = eager) must pass. One optimization per commit,
+  with its measured speedup. Check GPU equivalence against the original code: fp32 with
+  TF32 off should match to about 1e-7; bf16 should stay within the original's own
+  bf16-vs-fp32 gap.
+- Keep the fire mask outside any compiled region, so the masks and checkpoint replay
+  stay identical to eager.
 - Not allowed without asking: anything that changes the model or the protocol, such
   as fewer steps, a smaller `channel_n`, or fine-level crops (that is Variant B).
 
 ## Gotchas
-- `pathseg fit` wraps the model in `torch.compile` unless you pass `--no_compile`.
+- `pathseg fit` wraps the model in `torch.compile` unless you pass `--no_compile`. For
+  Med-NCA, always pass `--no_compile`: compilation is done per step by `compile_step`,
+  and a whole-model compile would unroll 2 × 64 steps.
+- `compile_step` needs `dynamic=False`. With dynamic shapes, checkpoint recomputation
+  recompiles and fails the checkpoint metadata check. The first training step takes
+  about 1 min longer (max-autotune; cached in `/tmp/torchinductor_$USER`), and Triton
+  needs a C compiler.
+- In fp32 on an A100, cuDNN convs use TF32 by default. Set
+  `torch.backends.cudnn.allow_tf32 = False` when checking equivalence to 1e-7.
 - Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
 - `--trainer.overfit_batches=1` does not fix the batch here (`WeightedRandomSampler` + random augmentations); overfit with a manual loop.
 - `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
