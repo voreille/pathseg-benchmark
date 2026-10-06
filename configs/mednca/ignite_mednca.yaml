@@ -38,6 +38,7 @@ model:
         n_eval_runs: 1
         grad_checkpointing_every: 8 # tune with the peak-memory probe
         max_batch_size: 32 # caps tiles per forward; validation sends all tiles of an ROI at once
+        compile_step: true # torch.compile the NCA step in CUDA training (~1 min compile); run with --no_compile
     tasks:
       ignite:
         loss_name: cross_entropy_dice

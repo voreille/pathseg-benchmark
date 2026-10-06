@@ -246,3 +246,76 @@ def test_segmenter_multitask_channels():
 def test_segmenter_rejects_too_few_channels():
     with pytest.raises(ValueError, match="channel_n"):
         MedNCASegmenter({"ignite": 16}, channel_n=18)
+
+
+def test_plain_step_matches_fused_step():
+    from pathseg.models.architectures import med_nca
+
+    level = make_encoder().levels["fine"]
+    x = torch.randn(2, 9, 7, 24, requires_grad=True)
+    stochastic = torch.rand(2, 9, 7, 1) > 0.5
+
+    outputs, grads = [], []
+    for step in (med_nca._nca_step, med_nca._nca_step_plain):
+        level.zero_grad(set_to_none=True)
+        x.grad = None
+        out = step(x, *level.folded_weights(), stochastic, torch.float32)
+        out.square().sum().backward()
+        outputs.append(out.detach())
+        grads.append([x.grad.clone()] + [p.grad.clone() for p in level.parameters()])
+
+    torch.testing.assert_close(outputs[1], outputs[0], rtol=1e-6, atol=1e-6)
+    for actual, expected in zip(grads[1], grads[0]):
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def use_compiled_steps(monkeypatch) -> list[int]:
+    """Replace the compiled step by a counting eager stand-in."""
+    from pathseg.models.architectures import med_nca
+
+    calls = [0]
+
+    def fake_compiled(*args):
+        calls[0] += 1
+        return med_nca._nca_step_plain(*args)
+
+    monkeypatch.setattr(med_nca, "_get_compiled_nca_step", lambda: fake_compiled)
+    return calls
+
+
+def test_compile_step_is_off_by_default_and_cuda_training_only(monkeypatch):
+    calls = use_compiled_steps(monkeypatch)
+    assert MedNCASegmenter({"ignite": 16}, steps=1).encoder.compile_step is False
+
+    encoder = make_encoder(steps=2, compile_step=True)
+    assert encoder.compile_step is True
+    x = torch.rand(1, 3, 16, 16)
+    encoder.train()
+    encoder.forward_feature_maps(x)
+    assert calls[0] == 0  # CPU: eager step
+
+    if not torch.cuda.is_available():
+        return
+    encoder.cuda()
+    x = x.cuda()
+    encoder.forward_feature_maps(x)
+    assert calls[0] == 2 * 2
+    with torch.no_grad():
+        encoder.forward_feature_maps(x)
+    encoder.eval()
+    encoder.forward_feature_maps(x)
+    assert calls[0] == 2 * 2  # no_grad and eval: eager step
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled step is CUDA-only")
+def test_compiled_step_matches_eager_on_cuda():
+    encoder = make_encoder(steps=5, grad_checkpointing_every=2).cuda().train()
+    x = torch.rand(2, 3, 32, 40, device="cuda")
+
+    expected_state, expected_grads = forward_backward(encoder, x)
+    encoder.set_compile_step(True)
+    state, grads = forward_backward(encoder, x)
+
+    torch.testing.assert_close(state, expected_state, rtol=1e-4, atol=1e-5)
+    for name, grad in grads.items():
+        torch.testing.assert_close(grad, expected_grads[name], rtol=1e-3, atol=1e-5)

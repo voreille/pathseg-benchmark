@@ -132,6 +132,46 @@ def _nca_step(
     return x + dx * stochastic.to(dx.dtype)
 
 
+def _nca_step_plain(
+    x: torch.Tensor,
+    kernel: torch.Tensor,
+    bias: torch.Tensor,
+    fc1_weight: torch.Tensor,
+    stochastic: torch.Tensor,
+    compute_dtype: torch.dtype,
+) -> torch.Tensor:
+    """``_nca_step`` in plain ops, written for ``torch.compile``.
+
+    Same function as ``_nca_step``. The hand-fused autograd Functions there
+    are opaque to Inductor; in plain ops it fuses pad + cast, bias + ReLU and
+    mask + residual (forward and backward) itself, which is faster.
+    """
+    x_cast = x.to(compute_dtype)
+    x_cast = torch.cat((x_cast[:, 1:2], x_cast, x_cast[:, -2:-1]), 1)
+    padded = torch.cat((x_cast[:, :, 1:2], x_cast, x_cast[:, :, -2:-1]), 2)
+    hidden = F.relu(F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias))
+    dx = F.linear(hidden.permute(0, 2, 3, 1), fc1_weight)
+    return x + dx * stochastic.to(dx.dtype)
+
+
+_compiled_nca_step = None
+
+
+def _get_compiled_nca_step():
+    """``_nca_step_plain`` compiled once per process, on first use.
+
+    ``dynamic=False``: with dynamic shapes, the checkpoint recomputation
+    recompiled the step and failed the checkpoint metadata check. Training
+    has two fixed shapes (coarse and fine level), so this costs two graphs.
+    """
+    global _compiled_nca_step
+    if _compiled_nca_step is None:
+        _compiled_nca_step = torch.compile(
+            _nca_step_plain, dynamic=False, mode="max-autotune-no-cudagraphs"
+        )
+    return _compiled_nca_step
+
+
 class BackboneNCA(nn.Module):
     """One NCA level: upstream ``BackboneNCA`` (perception) + ``BasicNCA`` (update).
 
@@ -151,6 +191,8 @@ class BackboneNCA(nn.Module):
         self.channel_n = int(channel_n)
         self.input_channels = int(input_channels)
         self.fire_rate = float(fire_rate)
+        # Not a parameter or buffer: the state_dict is unchanged.
+        self.compile_step = False
 
         # Same parameter names and creation order as upstream, so state dicts
         # are interchangeable and seeded initialization matches.
@@ -223,7 +265,10 @@ class BackboneNCA(nn.Module):
             torch.rand([x.size(0), x.size(1), x.size(2), 1], device=x.device)
             > fire_rate
         )
-        return _nca_step(x, *weights, stochastic, _compute_dtype(x))
+        step = _nca_step
+        if self.compile_step and self.training and torch.is_grad_enabled() and x.is_cuda:
+            step = _get_compiled_nca_step()
+        return step(x, *weights, stochastic, _compute_dtype(x))
 
     def forward(
         self,
@@ -262,6 +307,14 @@ class MedNCAEncoder(nn.Module):
     fire masks are drawn). It bounds memory when a caller passes many tiles at
     once (e.g. all tiles of a large ROI at validation). With grad enabled it
     saves little, since every chunk's activations are kept for backward.
+
+    ``set_compile_step(True)`` runs each NCA step through a ``torch.compile``d
+    plain-ops version (``max-autotune-no-cudagraphs``, static shapes; about 1 min
+    of compilation on first use). It is only active in training mode with grad
+    enabled on CUDA, where shapes are fixed. Eval and inference keep the eager
+    step, since validation's varying chunk sizes would each recompile. The fire
+    mask is drawn eagerly outside the compiled region, so masks and checkpoint
+    replay are unchanged. Same function to float round-off; default off.
     """
 
     level_names = ("coarse", "fine")
@@ -278,6 +331,7 @@ class MedNCAEncoder(nn.Module):
         n_eval_runs: int = 1,
         grad_checkpointing_every: int | None = None,
         max_batch_size: int | None = None,
+        compile_step: bool = False,
         input_channels: int = 3,
     ) -> None:
         super().__init__()
@@ -319,12 +373,22 @@ class MedNCAEncoder(nn.Module):
 
         self.grad_checkpointing_every: int | None = None
         self.set_grad_checkpointing(grad_checkpointing_every)
+        self.set_compile_step(compile_step)
 
     def set_grad_checkpointing(self, every: int | None = None) -> None:
         """Checkpoint every ``every`` NCA steps in training; ``None`` disables."""
         if every is not None and every < 1:
             raise ValueError(f"Checkpointing interval must be positive, got {every}.")
         self.grad_checkpointing_every = None if every is None else int(every)
+
+    def set_compile_step(self, enabled: bool = True) -> None:
+        """Use the compiled NCA step in CUDA training (see class docstring)."""
+        for level in self.levels.values():
+            level.compile_step = bool(enabled)
+
+    @property
+    def compile_step(self) -> bool:
+        return all(level.compile_step for level in self.levels.values())
 
     def downscale(self, imgs: torch.Tensor) -> torch.Tensor:
         """``B x 3 x H x W`` -> ``B x 3 x H/s x W/s`` (linear, no antialiasing).
@@ -491,6 +555,7 @@ class MedNCASegmenter(SemanticSegmenter):
         n_eval_runs: int = 1,
         grad_checkpointing_every: int | None = None,
         max_batch_size: int | None = None,
+        compile_step: bool = False,
     ) -> None:
         decoder = StateSliceDecoder(num_classes_by_task, input_channels=3)
 
@@ -504,6 +569,7 @@ class MedNCASegmenter(SemanticSegmenter):
             n_eval_runs=n_eval_runs,
             grad_checkpointing_every=grad_checkpointing_every,
             max_batch_size=max_batch_size,
+            compile_step=compile_step,
             input_channels=decoder.input_channels,
         )
 
