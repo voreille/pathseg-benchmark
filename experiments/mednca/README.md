@@ -110,6 +110,38 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
 (`WeightedRandomSampler` + random augmentations), so check 4 uses a direct loop
 over one fixed batch.
 
+## Throughput
+
+Measured with `experiments/mednca/profile_step.py`: one training step (forward,
+`cross_entropy_dice`, backward, AdamW), synthetic batch, no data loading.
+
+### Baseline (2026-10-06, commit `ef68485`)
+
+A100 80GB PCIe, tile 448, batch 16, `channel_n=64`, 64 steps/level,
+`grad_checkpointing_every=8`, bf16 autocast, `cudnn.benchmark` off.
+
+- **12.6 s/iter (0.079 it/s)**, matching the ~0.07 it/s seen in Lightning. The analytic
+  cost is 186 TFLOP/iter, so the achieved rate is **14.7 TFLOP/s** (~5% of A100 bf16 peak).
+  Peak memory is 40 GB.
+- Device time by kernel category:
+
+| category | s | share |
+|---|---|---|
+| copy (layout, strided `direct_copy`) | 5.98 | 47.0% |
+| elementwise (adds, mask, relu, ...) | 2.70 | 21.2% |
+| reflect pad (fp32) | 0.86 | 6.7% |
+| conv | 0.78 | 6.1% |
+| cast (fp32 → bf16) | 0.68 | 5.4% |
+| layout transform (cuDNN NCHW↔NHWC) | 0.68 | 5.3% |
+| gemm (`fc0`, `fc1`) | 0.62 | 4.8% |
+| cat | 0.32 | 2.5% |
+
+- The useful compute (conv + gemm) takes only 11% of device time. Most of the rest is
+  memory traffic from layout copies. That is consistent with upstream's
+  `transpose(1, 3)` producing a layout that neither cuDNN nor the GEMMs accept
+  directly. The other costs are `torch.cat`, the separate fp32 reflection pad, and
+  unfused elementwise ops.
+
 ## Results
 
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |
