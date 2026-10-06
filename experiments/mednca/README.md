@@ -226,7 +226,8 @@ A100 80GB PCIe, tile 448, batch 16, `channel_n=64`, 64 steps/level,
 
 Same setup as the baseline (tile 448, batch 16, `every=8`, bf16, A100, GPU otherwise idle).
 Each row is one commit. Equivalence is checked against the baseline on GPU (outputs and
-gradients). fp32 matches to about 1e-6. The bf16 differences stay below the baseline's own
+gradients) with `experiments/mednca/check_equivalence.py`, which loads `med_nca.py` from
+the pre-optimization commit `071dfa1`. fp32 matches to about 1e-6. The bf16 differences stay below the baseline's own
 bf16-vs-fp32 gap.
 
 | Commit | Change | s/iter | it/s | TFLOP/s | Peak mem | Speedup vs baseline |

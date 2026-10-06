@@ -232,9 +232,10 @@ Rules for further changes:
 - Constraints: keep parameter names and the state_dict, so checkpoints and upstream
   weights still load. `tests/test_med_nca_parity.py` (1e-5) and `tests/test_med_nca.py`
   (checkpointing, composition, compiled = eager) must pass. One optimization per commit,
-  with its measured speedup. Check GPU equivalence against the original code: fp32 with
+  with its measured speedup. Check GPU equivalence against the original code with
+  `experiments/mednca/check_equivalence.py --no-tf32` (and `--compile-step`): fp32 with
   TF32 off should match to about 1e-7; bf16 should stay within the original's own
-  bf16-vs-fp32 gap.
+  bf16-vs-fp32 gap (the script prints it).
 - Keep the fire mask outside any compiled region, so the masks and checkpoint replay
   stay identical to eager.
 - Not allowed without asking: anything that changes the model or the protocol, such
