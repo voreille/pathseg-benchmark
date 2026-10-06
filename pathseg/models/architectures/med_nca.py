@@ -69,6 +69,51 @@ def _reflect_pad_cast_hw(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return _ReflectPadCastHW.apply(x, dtype)
 
 
+class _CudnnConvBiasReLU(torch.autograd.Function):
+    """``relu(conv2d(x, weight, bias))`` (3x3, no padding) as one cuDNN kernel.
+
+    Eager PyTorch adds the conv bias and applies the ReLU as two extra passes
+    over the hidden map. ``torch.cudnn_convolution_relu`` fuses them but has
+    no autograd, so backward is spelled out with the ops autograd would use.
+    The only difference from eager is one rounding instead of two (the bias is
+    added before the output is cast).
+    """
+
+    @staticmethod
+    def forward(
+        ctx, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+    ) -> torch.Tensor:
+        out = torch.cudnn_convolution_relu(x, weight, bias, (1, 1), (0, 0), (1, 1), 1)
+        ctx.save_for_backward(x, weight, out)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor):
+        x, weight, out = ctx.saved_tensors
+        grad = torch.ops.aten.threshold_backward(grad, out, 0)
+        return torch.ops.aten.convolution_backward(
+            grad,
+            x,
+            weight,
+            [weight.shape[0]],
+            (1, 1),
+            (0, 0),
+            (1, 1),
+            False,
+            (0, 0),
+            1,
+            ctx.needs_input_grad,
+        )
+
+
+def _conv_bias_relu(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    if x.is_cuda and torch.backends.cudnn.is_available() and torch.backends.cudnn.enabled:
+        return _CudnnConvBiasReLU.apply(x, weight.to(x.dtype), bias.to(x.dtype))
+    return F.relu(F.conv2d(x, weight, bias))
+
+
 def _nca_step(
     x: torch.Tensor,
     kernel: torch.Tensor,
@@ -81,8 +126,8 @@ def _nca_step(
     # The conv casts to the autocast dtype anyway; casting while padding
     # gives the same values with less traffic.
     padded = _reflect_pad_cast_hw(x, compute_dtype)
-    hidden = F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias)
-    dx = F.linear(F.relu(hidden).permute(0, 2, 3, 1), fc1_weight)
+    hidden = _conv_bias_relu(padded.permute(0, 3, 1, 2), kernel, bias)
+    dx = F.linear(hidden.permute(0, 2, 3, 1), fc1_weight)
     # Masking in dx's dtype is exact (the mask is 0/1) and halves the traffic.
     return x + dx * stochastic.to(dx.dtype)
 

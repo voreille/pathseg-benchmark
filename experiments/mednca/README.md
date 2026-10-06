@@ -156,6 +156,7 @@ bf16-vs-fp32 gap.
 | fold | `p0`/`p1`/`fc0` folded into one 3×3 conv, built each forward from the existing weights. `fc1`'s image-channel rows are zeroed, so `dx = 0` there and the re-injection `cat` goes away. 98k → 74k MAC/pixel/step (TFLOP/s still counts the unfolded FLOPs). On GPU in true fp32 (TF32 off) it matches the baseline to 9e-8. | 3.21 | 0.312 | 58.0 | 19.4 GB | 3.94× |
 | pad | Reflect pad + bf16 cast as one autograd Function: one full copy forward and one backward, plus border strips. Replaces cast + 2 `cat`s forward and the strided accumulation adds in backward. Exactly equal to `F.pad(reflect)` (values and gradients). | 2.55 | 0.392 | 72.9 | 19.7 GB | 4.95× |
 | mask | Fire mask applied in bf16 (`dx * mask`, exact for a 0/1 mask) instead of upcasting `dx` to fp32 first | 2.47 | 0.404 | 75.2 | 19.7 GB | 5.11× |
+| conv-relu | Conv + bias + ReLU as one cuDNN kernel (`torch.cudnn_convolution_relu`) in an autograd Function with an explicit backward (`threshold_backward` + `convolution_backward`). Removes the separate bias-add and ReLU passes over the 128-channel hidden map. One bf16 rounding instead of two. Plain conv + ReLU off CUDA. Traces under `torch.compile(backend="aot_eager")` with identical results. | 2.09 | 0.479 | 89.1 | 19.5 GB | 6.05× |
 
 Tried and not kept:
 - `torch.addcmul(x, dx, mask)` for the masked residual: bit-identical but no faster
