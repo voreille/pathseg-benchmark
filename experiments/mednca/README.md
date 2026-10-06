@@ -94,6 +94,9 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
 - With `compile_step: true`, the first training step takes about 1 minute longer
   (Inductor max-autotune, 2 graphs: coarse and fine level). Later runs reuse the Inductor
   cache (`/tmp/torchinductor_$USER`). It needs a C compiler for Triton (gcc).
+  Inductor's per-kernel autotune reports (`AUTOTUNE mm(...)` tables, "Autotune Choices
+  Stats") are switched off for this compile only. Set `TORCHINDUCTOR_*` env vars or
+  `TORCH_LOGS` if you want to see what it tunes.
 - Validation passes all tiles of an image through the network in one call
   (`eval_step` → `self(crops)`). IGNITE ROIs reach about 2800 × 2200 px, which is
   about 120 tiles of 448. Measured on an A100 (no_grad, bf16-mixed, 64 steps):

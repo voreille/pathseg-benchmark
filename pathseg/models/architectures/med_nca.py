@@ -160,14 +160,23 @@ _compiled_nca_step = None
 def _get_compiled_nca_step():
     """``_nca_step_plain`` compiled once per process, on first use.
 
+    Same options as ``mode="max-autotune-no-cudagraphs"``, minus the autotune
+    reports.
+
     ``dynamic=False``: with dynamic shapes, the checkpoint recomputation
     recompiled the step and failed the checkpoint metadata check. Training
     has two fixed shapes (coarse and fine level), so this costs two graphs.
     """
     global _compiled_nca_step
     if _compiled_nca_step is None:
+        options = torch._inductor.list_mode_options("max-autotune-no-cudagraphs")
+        # max-autotune prints a benchmark table per tuned conv/GEMM to stderr.
+        options.update(
+            autotune_num_choices_displayed=0,
+            max_autotune_report_choices_stats=False,
+        )
         _compiled_nca_step = torch.compile(
-            _nca_step_plain, dynamic=False, mode="max-autotune-no-cudagraphs"
+            _nca_step_plain, dynamic=False, options=options
         )
     return _compiled_nca_step
 
