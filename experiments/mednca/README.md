@@ -63,6 +63,7 @@ The allowed adaptations are listed in `CLAUDE.md`.
 | 7 | `n_eval_runs` eval-time averaging of the state (default 1 = upstream) | Optional variance reduction |
 | 8 | The fine level runs on the whole tile in training (Variant A), not on a random crop | Benchmark protocol. The crop recipe is Variant B, in a training module only. |
 | 9 | Input = RGB / 255 in [0, 1], with no z-norm | Shared benchmark pipeline. The range is comparable to upstream's [0, 1] rescale. |
+| 10 | `max_batch_size` (default off; 32 in the IGNITE config): `forward_feature_maps` splits larger inputs into chunks and concatenates them. No cross-sample ops, so the function is unchanged; only the fire-mask draw order differs. Approved by the user (not on the CLAUDE.md list). | Validation sends all tiles of an ROI in one call, at about 0.57 GB per 448 px tile (no_grad, bf16, A100). Large ROIs ran out of memory. With the cap, 150 tiles peak at 23.4 GB. |
 
 The parameter count at `channel_n = 64`, `hidden_size = 128` is 106,752 per level,
 so 213,504 in total. At `channel_n = 96` it is 430,720.
@@ -89,9 +90,9 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
   with `--no_compile`.
 - Validation passes all tiles of an image through the network in one call
   (`eval_step` → `self(crops)`). IGNITE ROIs reach about 2800 × 2200 px, which is
-  up to about 120 tiles of 448. Under `no_grad`, one 64-channel fp32 state for
-  120 tiles is about 6 GB, with several times that transient per step. Watch
-  validation memory on the target GPU.
+  about 120 tiles of 448. Measured on an A100 (no_grad, bf16-mixed, 64 steps):
+  about 0.57 GB per tile, so a large ROI needs about 70 GB and ran out of memory.
+  `max_batch_size: 32` caps tiles per forward. With it, 150 tiles peak at 23.4 GB.
 
 ## Sanity checks (CLAUDE.md)
 

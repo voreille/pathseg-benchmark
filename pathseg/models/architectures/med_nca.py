@@ -119,6 +119,13 @@ class MedNCAEncoder(nn.Module):
     in the backward pass. It is only active in training mode with grad enabled
     and does not change the computed function (fire masks are replayed through
     the preserved RNG state).
+
+    ``max_batch_size`` caps how many images one forward pass processes; larger
+    inputs are split into chunks and concatenated. The NCA has no cross-sample
+    ops, so this does not change the computed function (only the order in which
+    fire masks are drawn). It bounds memory when a caller passes many tiles at
+    once (e.g. all tiles of a large ROI at validation). With grad enabled it
+    saves little, since every chunk's activations are kept for backward.
     """
 
     level_names = ("coarse", "fine")
@@ -134,6 +141,7 @@ class MedNCAEncoder(nn.Module):
         scale_factor: int = 4,
         n_eval_runs: int = 1,
         grad_checkpointing_every: int | None = None,
+        max_batch_size: int | None = None,
         input_channels: int = 3,
     ) -> None:
         super().__init__()
@@ -148,6 +156,10 @@ class MedNCAEncoder(nn.Module):
             raise ValueError(f"scale_factor must be positive, got {scale_factor}.")
         if n_eval_runs < 1:
             raise ValueError(f"n_eval_runs must be positive, got {n_eval_runs}.")
+        if max_batch_size is not None and max_batch_size < 1:
+            raise ValueError(
+                f"max_batch_size must be positive, got {max_batch_size}."
+            )
 
         self.channel_n = int(channel_n)
         self.input_channels = int(input_channels)
@@ -155,6 +167,7 @@ class MedNCAEncoder(nn.Module):
         self.steps = int(steps)
         self.scale_factor = int(scale_factor)
         self.n_eval_runs = int(n_eval_runs)
+        self.max_batch_size = None if max_batch_size is None else int(max_batch_size)
 
         self.levels = nn.ModuleDict(
             {
@@ -254,12 +267,21 @@ class MedNCAEncoder(nn.Module):
         return self.run_level("fine", state, imgs)
 
     def forward_feature_maps(self, imgs: torch.Tensor) -> tuple[torch.Tensor]:
+        if self.max_batch_size is None or imgs.shape[0] <= self.max_batch_size:
+            return (self._mean_state(imgs).permute(0, 3, 1, 2),)
+        states = [
+            self._mean_state(chunk) for chunk in imgs.split(self.max_batch_size)
+        ]
+        return (torch.cat(states).permute(0, 3, 1, 2),)
+
+    def _mean_state(self, imgs: torch.Tensor) -> torch.Tensor:
+        """Channels-last state; the mean of ``n_eval_runs`` passes in eval mode."""
         state = self.forward_state(imgs)
         if not self.training and self.n_eval_runs > 1:
             for _ in range(self.n_eval_runs - 1):
                 state = state + self.forward_state(imgs)
             state = state / self.n_eval_runs
-        return (state.permute(0, 3, 1, 2),)
+        return state
 
 
 class StateSliceDecoder(nn.Module):
@@ -332,6 +354,7 @@ class MedNCASegmenter(SemanticSegmenter):
         scale_factor: int = 4,
         n_eval_runs: int = 1,
         grad_checkpointing_every: int | None = None,
+        max_batch_size: int | None = None,
     ) -> None:
         decoder = StateSliceDecoder(num_classes_by_task, input_channels=3)
 
@@ -344,6 +367,7 @@ class MedNCASegmenter(SemanticSegmenter):
             scale_factor=scale_factor,
             n_eval_runs=n_eval_runs,
             grad_checkpointing_every=grad_checkpointing_every,
+            max_batch_size=max_batch_size,
             input_channels=decoder.input_channels,
         )
 

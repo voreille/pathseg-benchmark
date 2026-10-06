@@ -91,6 +91,35 @@ def test_eval_mode_averages_n_eval_runs_passes():
     assert not torch.equal(passes[0], passes[1])
 
 
+@pytest.mark.parametrize("training", [False, True])
+def test_max_batch_size_does_not_change_outputs(training):
+    # fire_rate=0 makes every update fire, so chunking can't change fire masks.
+    x = torch.rand(5, 3, 16, 24)
+    encoder = make_encoder(fire_rate=0.0, n_eval_runs=2).train(training)
+    (expected,) = encoder.forward_feature_maps(x)
+
+    encoder.max_batch_size = 2
+    (chunked,) = encoder.forward_feature_maps(x)
+
+    torch.testing.assert_close(chunked, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_max_batch_size_splits_the_forward(monkeypatch):
+    encoder = make_encoder(max_batch_size=2).eval()
+    sizes = []
+    forward_state = encoder.forward_state
+    monkeypatch.setattr(
+        encoder,
+        "forward_state",
+        lambda imgs: sizes.append(imgs.shape[0]) or forward_state(imgs),
+    )
+    with torch.no_grad():
+        (state,) = encoder.forward_feature_maps(torch.rand(5, 3, 16, 24))
+
+    assert sizes == [2, 2, 1]
+    assert state.shape == (5, 24, 16, 24)
+
+
 def test_train_mode_runs_a_single_pass():
     encoder = make_encoder(n_eval_runs=3).train()
     x = torch.rand(1, 3, 16, 16)
