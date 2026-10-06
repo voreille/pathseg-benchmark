@@ -182,6 +182,25 @@ baseline config with only the changes above.
   `experiments/mednca/README.md`, plus a results table next to the ViT baselines.
 - Outputs (checkpoints, wandb) stay out of git.
 
+## Current focus: training throughput
+Variant A trains at ~0.07 it/s (448 px, batch 16, bf16, A100), versus 1.44 it/s for
+h0-mini + linear at 896 px. Per iteration Med-NCA needs only ~3× the FLOPs (~185 vs
+~63 TFLOP), but it reaches only ~13 TFLOP/s against ~90 for h0-mini. So most of the gap is
+implementation inefficiency, not model cost. Goal: speed up training **without changing
+the computed function**.
+- Profile before optimizing: `experiments/mednca/profile_step.py` (one training step,
+  top kernels, time per op category, achieved TFLOP/s). Record findings in the README.
+- Allowed: implementation-level rewrites that compute the same function. For example:
+  fold `p0`/`p1`/`fc0` into one 3×3 conv built from the existing weights; avoid the
+  layout copies caused by upstream's `transpose(1, 3)` (transposed kernels); `fc1` as a
+  1×1 conv; `cudnn.benchmark`; `torch.compile` of the single-step update.
+- Constraints: keep parameter names and the state_dict, so checkpoints and upstream
+  weights still load. `tests/test_med_nca_parity.py` and the checkpointing/composition
+  tests must still pass (to float tolerance). One optimization per commit, with its
+  measured speedup.
+- Not allowed without asking: anything that changes the model or the protocol, such
+  as fewer steps, a smaller `channel_n`, or fine-level crops (that is Variant B).
+
 ## Gotchas
 - `pathseg fit` wraps the model in `torch.compile` unless you pass `--no_compile`.
 - Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
