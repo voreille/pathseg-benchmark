@@ -29,13 +29,61 @@ def _compute_dtype(x: torch.Tensor) -> torch.dtype:
     return x.dtype
 
 
-def _reflect_pad_hw(x: torch.Tensor) -> torch.Tensor:
-    """Reflect-pad H and W of a channels-last ``B x H x W x C`` by 1.
+class _ReflectPadCastHW(torch.autograd.Function):
+    """Reflect-pad H and W of a channels-last ``B x H x W x C`` by 1 and cast.
 
-    ``F.pad(mode="reflect")`` would return NCHW memory; this stays NHWC.
+    Same values as ``F.pad(..., mode="reflect")`` on the NCHW view followed by
+    ``.to(dtype)``, but the output stays NHWC (``F.pad`` returns NCHW memory)
+    and the pad and cast are one full-tensor copy forward and one backward,
+    plus thin border strips.
     """
-    x = torch.cat((x[:, 1:2], x, x[:, -2:-1]), 1)
-    return torch.cat((x[:, :, 1:2], x, x[:, :, -2:-1]), 2)
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        ctx.input_dtype = x.dtype
+        batch, height, width, channels = x.shape
+        out = x.new_empty((batch, height + 2, width + 2, channels), dtype=dtype)
+        out[:, 1:-1, 1:-1] = x
+        out[:, 0, 1:-1] = out[:, 2, 1:-1]
+        out[:, -1, 1:-1] = out[:, -3, 1:-1]
+        out[:, :, 0] = out[:, :, 2]
+        out[:, :, -1] = out[:, :, -3]
+        return out
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+        # Fold the border onto the cells it was copied from: columns first
+        # (corners included), then rows.
+        grad_x = grad[:, 1:-1, 1:-1].to(ctx.input_dtype, copy=True)
+        grad_x[:, :, 1] += grad[:, 1:-1, 0]
+        grad_x[:, :, -2] += grad[:, 1:-1, -1]
+        rows = grad[:, (0, -1)].to(ctx.input_dtype)
+        rows[:, :, 2] += rows[:, :, 0]
+        rows[:, :, -3] += rows[:, :, -1]
+        grad_x[:, 1] += rows[:, 0, 1:-1]
+        grad_x[:, -2] += rows[:, 1, 1:-1]
+        return grad_x, None
+
+
+def _reflect_pad_cast_hw(x: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    return _ReflectPadCastHW.apply(x, dtype)
+
+
+def _nca_step(
+    x: torch.Tensor,
+    kernel: torch.Tensor,
+    bias: torch.Tensor,
+    fc1_weight: torch.Tensor,
+    stochastic: torch.Tensor,
+    compute_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Deterministic part of one NCA step on a channels-last state."""
+    # The conv casts to the autocast dtype anyway; casting while padding
+    # gives the same values with less traffic.
+    padded = _reflect_pad_cast_hw(x, compute_dtype)
+    hidden = F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias)
+    dx = F.linear(F.relu(hidden).permute(0, 2, 3, 1), fc1_weight)
+    return x + dx * stochastic.float()
 
 
 class BackboneNCA(nn.Module):
@@ -120,23 +168,16 @@ class BackboneNCA(nn.Module):
         """One step on a channels-last state. The image channels are left as is."""
         if fire_rate is None:
             fire_rate = self.fire_rate
-        kernel, bias, fc1_weight = self.folded_weights() if weights is None else weights
-
-        # The conv casts to the autocast dtype anyway; casting before padding
-        # gives the same values with half the traffic.
-        padded = _reflect_pad_hw(x.to(_compute_dtype(x)))
-        hidden = F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias)
-        dx = F.linear(F.relu(hidden).permute(0, 2, 3, 1), fc1_weight)
+        if weights is None:
+            weights = self.folded_weights()
 
         # Deviation: upstream draws the mask on the CPU generator and copies it
         # to the device. Same distribution; identical to upstream on CPU.
         stochastic = (
-            torch.rand([dx.size(0), dx.size(1), dx.size(2), 1], device=dx.device)
+            torch.rand([x.size(0), x.size(1), x.size(2), 1], device=x.device)
             > fire_rate
         )
-        dx = dx * stochastic.float()
-
-        return x + dx
+        return _nca_step(x, *weights, stochastic, _compute_dtype(x))
 
     def forward(
         self,
