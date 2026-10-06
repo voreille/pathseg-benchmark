@@ -142,6 +142,18 @@ A100 80GB PCIe, tile 448, batch 16, `channel_n=64`, 64 steps/level,
   directly. The other costs are `torch.cat`, the separate fp32 reflection pad, and
   unfused elementwise ops.
 
+### Optimizations (same function, same `state_dict`)
+
+Same setup as the baseline (tile 448, batch 16, `every=8`, bf16, A100, GPU otherwise idle).
+Each row is one commit. Equivalence is checked against the baseline on GPU (outputs and
+gradients). fp32 matches to about 1e-6. The bf16 differences stay below the baseline's own
+bf16-vs-fp32 gap.
+
+| Commit | Change | s/iter | it/s | TFLOP/s | Peak mem | Speedup vs baseline |
+|---|---|---|---|---|---|---|
+| baseline | upstream layout (`transpose(1, 3)`) | 12.63 | 0.079 | 14.7 | 40.0 GB | 1.00× |
+| layout | Perception on the channels-last state as a free NHWC view with spatially transposed kernels (no `transpose(1, 3)` copies). Reflect pad done in NHWC, cast to bf16 before pad/cat | 4.75 | 0.211 | 39.2 | 29.7 GB | 2.66× |
+
 ## Results
 
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |

@@ -88,7 +88,9 @@ def test_backbone_matches_upstream(upstream_backbone_cls):
     torch.manual_seed(7)
     actual = port(state, steps=10)
 
-    torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
+    # Float tolerance: the port convolves NHWC with transposed kernels, so the
+    # summation order (not the function) differs from upstream.
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(
         actual[..., :INPUT_CHANNELS], state[..., :INPUT_CHANNELS], rtol=0.0, atol=0.0
     )

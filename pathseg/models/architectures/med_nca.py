@@ -21,6 +21,23 @@ from pathseg.models.semantic_segmenter import (
 )
 
 
+def _compute_dtype(x: torch.Tensor) -> torch.dtype:
+    """The dtype autocast would run convs/linears in, else ``x.dtype``."""
+    device_type = x.device.type
+    if torch.is_autocast_enabled(device_type):
+        return torch.get_autocast_dtype(device_type)
+    return x.dtype
+
+
+def _reflect_pad_hw(x: torch.Tensor) -> torch.Tensor:
+    """Reflect-pad H and W of a channels-last ``B x H x W x C`` by 1.
+
+    ``F.pad(mode="reflect")`` would return NCHW memory; this stays NHWC.
+    """
+    x = torch.cat((x[:, 1:2], x, x[:, -2:-1]), 1)
+    return torch.cat((x[:, :, 1:2], x, x[:, :, -2:-1]), 2)
+
+
 class BackboneNCA(nn.Module):
     """One NCA level: upstream ``BackboneNCA`` (perception) + ``BasicNCA`` (update).
 
@@ -66,17 +83,28 @@ class BackboneNCA(nn.Module):
         )
 
     def perceive(self, x: torch.Tensor) -> torch.Tensor:
-        return torch.cat((x, self.p0(x), self.p1(x)), 1)
+        """Channels-last ``x`` -> channels-last ``[x | p0(x) | p1(x)]``.
+
+        Upstream runs ``p0``/``p1`` on ``x.transpose(1, 3)``, i.e. on the
+        H/W-transposed grid. A convolution on the transposed grid equals a
+        convolution on the original grid with spatially transposed kernels
+        (reflect padding commutes with the transpose), so we keep the state
+        channels-last and hand cuDNN a free NHWC view instead of a transposed
+        layout it has to copy. Same function, same weights.
+        """
+        # The convs and fc0 cast to the autocast dtype anyway; casting before
+        # padding and concatenating gives the same values with half the traffic.
+        x = x.to(_compute_dtype(x))
+        padded = _reflect_pad_hw(x).permute(0, 3, 1, 2)
+        p0 = F.conv2d(padded, self.p0.weight.transpose(2, 3), self.p0.bias)
+        p1 = F.conv2d(padded, self.p1.weight.transpose(2, 3), self.p1.bias)
+        return torch.cat((x, p0.permute(0, 2, 3, 1), p1.permute(0, 2, 3, 1)), 3)
 
     def update(self, x: torch.Tensor, fire_rate: float | None = None) -> torch.Tensor:
         if fire_rate is None:
             fire_rate = self.fire_rate
 
-        # Upstream transposes dims 1 and 3 (B x H x W x C -> B x C x W x H),
-        # so the perception convs run on the H/W-transposed grid. Kept as is
-        # for weight compatibility.
-        dx = self.perceive(x.transpose(1, 3)).transpose(1, 3)
-        dx = self.fc1(F.relu(self.fc0(dx)))
+        dx = self.fc1(F.relu(self.fc0(self.perceive(x))))
 
         # Deviation: upstream draws the mask on the CPU generator and copies it
         # to the device. Same distribution; identical to upstream on CPU.
