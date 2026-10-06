@@ -30,6 +30,10 @@ from pathseg.training.histo_loss import CrossEntropyDiceLoss
 
 # First matching pattern wins, so specific names come before generic ones.
 KERNEL_CATEGORIES: list[tuple[str, str]] = [
+    # Inductor kernels (compile_step); their names list every fused op.
+    ("triton template (conv/mm + fused ops)", r"^triton_tem_"),
+    ("triton pointwise", r"^triton_poi_"),
+    ("triton reduction", r"^triton_(red|per)_"),
     ("layout transform", r"nchwToNhwc|nhwcToNchw|transpose|permute"),
     ("reflect pad", r"reflection_pad"),
     ("conv", r"conv|cudnn|fprop|dgrad|wgrad|implicit_gemm|xmma"),
@@ -94,20 +98,20 @@ def print_category_table(events, total_us: float) -> None:
     for event in events:
         by_category[categorize(event.key)] += event.self_device_time_total
     print("\nDevice time by kernel category")
-    print(f"{'category':<20}{'ms':>12}{'share':>9}")
+    print(f"{'category':<40}{'ms':>12}{'share':>9}")
     for category, us in sorted(by_category.items(), key=lambda item: -item[1]):
-        print(f"{category:<20}{us / 1e3:>12.1f}{100 * us / total_us:>8.1f}%")
+        print(f"{category:<40}{us / 1e3:>12.1f}{100 * us / total_us:>8.1f}%")
 
 
 def print_top_kernels(events, total_us: float, limit: int) -> None:
     print(f"\nTop {limit} CUDA kernels by device time")
-    print(f"{'ms':>10}{'share':>8}{'calls':>9}  {'category':<18}kernel")
+    print(f"{'ms':>10}{'share':>8}{'calls':>9}  {'category':<40}kernel")
     for event in sorted(events, key=lambda e: -e.self_device_time_total)[:limit]:
         us = event.self_device_time_total
         name = event.key if len(event.key) <= 110 else event.key[:107] + "..."
         print(
             f"{us / 1e3:>10.1f}{100 * us / total_us:>7.1f}%{event.count:>9}  "
-            f"{categorize(event.key):<18}{name}"
+            f"{categorize(event.key):<40}{name}"
         )
 
 
@@ -123,6 +127,9 @@ def main() -> None:
     parser.add_argument("--num-classes", type=int, default=16)
     parser.add_argument("--no-bf16", dest="bf16", action="store_false")
     parser.add_argument("--cudnn-benchmark", action="store_true")
+    parser.add_argument(
+        "--compile-step", action="store_true", help="network compile_step=True"
+    )
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--iters", type=int, default=3, help="timed iterations")
     parser.add_argument("--no-profile", dest="profile", action="store_false")
@@ -144,6 +151,7 @@ def main() -> None:
         steps=args.steps,
         scale_factor=args.scale_factor,
         grad_checkpointing_every=args.every or None,
+        compile_step=args.compile_step,
     ).to(device)
     network.train()
     criterion = CrossEntropyDiceLoss(ignore_index=255).to(device)
@@ -154,7 +162,8 @@ def main() -> None:
     print(
         f"{name} | tile={args.tile} batch={args.batch_size} channel_n={args.channel_n} "
         f"hidden={args.hidden_size} steps={args.steps} every={args.every or 'off'} "
-        f"bf16={args.bf16} cudnn.benchmark={args.cudnn_benchmark}"
+        f"bf16={args.bf16} cudnn.benchmark={args.cudnn_benchmark} "
+        f"compile_step={args.compile_step}"
     )
 
     for _ in range(args.warmup):
