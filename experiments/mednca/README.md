@@ -5,7 +5,9 @@ ported as a `SemanticSegmenter` for the pathseg benchmark.
 
 - Architecture: `pathseg/models/architectures/med_nca.py`
 - Config (Variant A, benchmark protocol): `configs/mednca/ignite_mednca.yaml`
-- Tests: `tests/test_med_nca.py`, `tests/test_med_nca_parity.py`
+- Config (Variant B, the authors' training recipe): `configs/mednca/ignite_mednca_upstream.yaml`,
+  training module `pathseg/training/med_nca.py` (see [Variant B](#variant-b-the-authors-training-recipe))
+- Tests: `tests/test_med_nca.py`, `tests/test_med_nca_parity.py`, `tests/test_med_nca_training.py`
 
 ## Upstream reference
 
@@ -102,6 +104,68 @@ Base: `configs/semantic_two_heads_refactored.yaml`.
   about 120 tiles of 448. Measured on an A100 (no_grad, bf16-mixed, 64 steps):
   about 0.57 GB per tile, so a large ROI needs about 70 GB and ran out of memory.
   `max_batch_size: 32` caps tiles per forward. With it, 150 tiles peak at 23.4 GB.
+
+## Variant B: the authors' training recipe
+
+Goal: train as close to the Med-NCA authors as the benchmark allows, while evaluating
+exactly like every other model. Variant A (above) uses the benchmark's training protocol
+and converged slowly. Variant B is the run meant to represent Med-NCA.
+
+Run (on the host; `--no_compile` as for Variant A):
+
+    pathseg fit -c configs/mednca/ignite_mednca_upstream.yaml --data.num_workers=8 --no_compile
+
+### What upstream does in training, and what we do
+
+Read from upstream `Agent_Med_NCA.get_outputs` (training path), `Agent_Multi_NCA.batch_step`,
+`Agent.initialize`, `src/losses/LossFunctions.py` and `train_Med_NCA.ipynb` (commit `a844a72`).
+
+| | Upstream | Variant B (`MedNCATraining`) |
+|---|---|---|
+| Coarse level | Whole image downscaled ×4, 64 steps | same (whole 448 tile → 112) |
+| Fine level | Upscaled state, then **one random crop per sample** of size `input_size[0]` (= coarse size), 64 steps | same: 112 × 112 crop of the 448 tile, same position for state, image and target |
+| Loss | Only on the fine-level crop. `DiceBCELoss` (sigmoid; BCE mean + Dice with `smooth=1`, both over the flattened batch) **per output channel, summed over the channels whose target has a positive pixel**. The step is skipped if none does | same (`upstream_dice_bce_loss`), over the 16 class channels |
+| Optimizer | One `Adam(lr=1.6e-3, betas=(0.5, 0.5))` per level, no weight decay | One Adam over both levels with the same settings (identical: Adam is per-parameter) |
+| LR schedule | `ExponentialLR(γ=0.9999)`, stepped after **every batch** | same (`interval: step`) |
+| Batch size | 20 (notebook) | 20 |
+| `channel_n` | 32 = 1 in + 1 out + **30 hidden** (notebook) | 48 = 3 in + 16 out + **29 hidden** |
+| Steps / fire rate / `hidden_size` / levels / scale | 64 / 0.5 / 128 / 2 / 4 | same |
+| Inference | Full image, `no_grad`, one stochastic pass | same, through the benchmark tiler (448 / 224), `n_eval_runs=1` |
+
+Choices made by the user (2026-10-06): upstream Dice+BCE rather than the benchmark loss;
+448 tiles with a 112 crop (the coarse level then covers most of the tile, as upstream's
+covers the whole image), rather than 896 / 224; `channel_n` 48 to match upstream's
+hidden-channel count; batch 20 as upstream.
+
+### Remaining deviations from upstream in Variant B
+
+| Deviation | Why |
+|---|---|
+| RGB input, 16 output channels (IGNITE classes, background included) | Task. Upstream is 1-channel MRI with 1 binary output. |
+| Pixels with the ignore label (255) are left out of BCE and Dice | Upstream has no ignore label |
+| BCE computed from logits (`binary_cross_entropy_with_logits`) | Same value as upstream's `sigmoid` + `binary_cross_entropy`, but numerically stable (no clamping) |
+| Crop corners from the torch generator, not Python `random` | Seeded with the rest of the run |
+| Input = RGB / 255 in [0, 1], no z-norm + min-max rescale | Shared benchmark pipeline (Variant A deviation 9) |
+| Fire mask drawn on GPU; downscale with `F.interpolate` instead of torchio | Same as Variant A (deviations 4, 5) |
+| Augmentations, sampling and training length (`max_steps: 40000`, the benchmark's) | Benchmark data pipeline. Upstream trains for 1000 epochs over its dataset. With γ = 0.9999 per step, the lr ends at 1.6e-3 × 0.9999^40000 ≈ 2.9e-5. |
+| Evaluation with the tiler (448 tiles, stride 224, weighted blend) | Benchmark protocol, identical for all models |
+| A skipped batch (no labelled pixel) may still advance Lightning's scheduler | Rare (all-ignore crop); upstream also skips the scheduler step |
+
+### Checks
+
+- `tests/test_med_nca_training.py`:
+  - the loss matches upstream `DiceBCELoss` summed over present classes (imported from
+    the upstream checkout, skipped without it);
+  - ignored pixels are left out, and all-ignored batches are skipped;
+  - the crop uses the same position for state, image and target;
+  - a training step backpropagates into both levels;
+  - the optimizer and scheduler use upstream settings.
+- `fast_dev_run` through LightningCLI with the real config on an A100 (train + validation):
+  pass. Initial loss 18.7 (≈ 16 present classes × ~1.2).
+- Step throughput (synthetic batch 20 × 448, bf16, A100): **4.49 it/s with `compile_step`**
+  (0.22 s/iter, 15.0 GB peak, no checkpointing), 3.17 it/s eager. Variant A runs at 0.66 it/s.
+- Parameters at `channel_n = 48`: 66,272 per level, 132,544 in total (upstream notebook:
+  2 × 35,008 at `channel_n = 32`).
 
 ## Sanity checks (CLAUDE.md)
 
@@ -227,4 +291,5 @@ Tried and not kept:
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |
 |---|---|---|---|---|---|---|
 | h0-mini + linear (baseline) | IGNITE | 896 | | | | multitask config |
-| Med-NCA (Variant A) | IGNITE | 448 | | | 213.5k | |
+| Med-NCA (Variant A) | IGNITE | 448 | | | 213.5k | benchmark training protocol |
+| Med-NCA (Variant B) | IGNITE | 448 | | | 132.5k | authors' recipe (crops, Dice+BCE, Adam) |

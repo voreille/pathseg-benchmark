@@ -95,6 +95,20 @@ Validation/test go through the unchanged inherited path, i.e. the full-tile
 model. Config change: `model.class_path` → `MedNCATraining` (+ crop size and optimizer
 init args). The network config is the same as Variant A.
 
+**Status (2026-10-06): Variant B is implemented and is the run meant to represent
+Med-NCA.** Variant A trained, but converged slowly. The user wants training as close to
+the authors as possible: `configs/mednca/ignite_mednca_upstream.yaml`. Decisions made by
+the user, which go beyond the spec above:
+- Loss: upstream per-class sigmoid Dice + BCE, summed over the classes present
+  (`loss: upstream_dice_bce`), not the inherited benchmark loss (`loss: benchmark` is
+  still available). Only training uses it; evaluation is unchanged.
+- 448 tiles with a 112 fine-level crop (= coarse size, as upstream), not 896 / 224.
+- `channel_n: 48` (29 hidden channels, like upstream's 30), not 64. Batch 20 (upstream).
+- Upstream optimizer: Adam lr 1.6e-3, betas (0.5, 0.5), no weight decay,
+  ExponentialLR 0.9999 per step.
+The upstream-vs-ours table and the remaining deviations are in
+`experiments/mednca/README.md` → "Variant B".
+
 ## Upstream code
 - Reference implementation: the original Med-NCA repo
   (https://github.com/MECLabTUDA/Med-NCA), cloned outside this repo at
@@ -238,6 +252,9 @@ Rules for further changes:
   `torch.backends.cudnn.allow_tf32 = False` when checking equivalence to 1e-7.
 - Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
 - `--trainer.overfit_batches=1` does not fix the batch here (`WeightedRandomSampler` + random augmentations); overfit with a manual loop.
+- In the claude-box sandbox, `/dev/shm` is 64 MB, so DataLoader workers fail or hang
+  ("unable to allocate shared memory"). Use `--data.num_workers=0` there. The host is
+  fine with 8 workers.
 - `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
 
 ## Follow-ups (not now)
