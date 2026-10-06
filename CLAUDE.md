@@ -182,6 +182,12 @@ baseline config with only the changes above.
   `experiments/mednca/README.md`, plus a results table next to the ViT baselines.
 - Outputs (checkpoints, wandb) stay out of git.
 
+## Gotchas
+- `pathseg fit` wraps the model in `torch.compile` unless you pass `--no_compile`.
+- Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
+- `--trainer.overfit_batches=1` does not fix the batch here (`WeightedRandomSampler` + random augmentations); overfit with a manual loop.
+- `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
+
 ## Follow-ups (not now)
 - Learned 1×1 head on hidden channels; more NCA steps.
 - Per-pixel variance over `n_eval_runs` as an uncertainty/QC map.
