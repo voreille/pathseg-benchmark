@@ -155,6 +155,15 @@ bf16-vs-fp32 gap.
 | layout | Perception on the channels-last state as a free NHWC view with spatially transposed kernels (no `transpose(1, 3)` copies). Reflect pad done in NHWC, cast to bf16 before pad/cat | 4.75 | 0.211 | 39.2 | 29.7 GB | 2.66× |
 | fold | `p0`/`p1`/`fc0` folded into one 3×3 conv, built each forward from the existing weights. `fc1`'s image-channel rows are zeroed, so `dx = 0` there and the re-injection `cat` goes away. 98k → 74k MAC/pixel/step (TFLOP/s still counts the unfolded FLOPs). On GPU in true fp32 (TF32 off) it matches the baseline to 9e-8. | 3.21 | 0.312 | 58.0 | 19.4 GB | 3.94× |
 | pad | Reflect pad + bf16 cast as one autograd Function: one full copy forward and one backward, plus border strips. Replaces cast + 2 `cat`s forward and the strided accumulation adds in backward. Exactly equal to `F.pad(reflect)` (values and gradients). | 2.55 | 0.392 | 72.9 | 19.7 GB | 4.95× |
+| mask | Fire mask applied in bf16 (`dx * mask`, exact for a 0/1 mask) instead of upcasting `dx` to fp32 first | 2.47 | 0.404 | 75.2 | 19.7 GB | 5.11× |
+
+Tried and not kept:
+- `torch.addcmul(x, dx, mask)` for the masked residual: bit-identical but no faster
+  (2.54 s/iter), because the mixed-dtype kernel is not vectorized and backward adds copies.
+- `cudnn.benchmark=True`: no gain (2.55 s/iter at the `pad` commit). With NHWC inputs,
+  cuDNN's heuristics already pick the same kernels.
+- `torch.compile` of `_nca_step`: not measurable in the claude-box container, because
+  Triton needs a C compiler and none is installed there. To be measured on the host.
 
 ## Results
 

@@ -83,7 +83,8 @@ def _nca_step(
     padded = _reflect_pad_cast_hw(x, compute_dtype)
     hidden = F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias)
     dx = F.linear(F.relu(hidden).permute(0, 2, 3, 1), fc1_weight)
-    return x + dx * stochastic.float()
+    # Masking in dx's dtype is exact (the mask is 0/1) and halves the traffic.
+    return x + dx * stochastic.to(dx.dtype)
 
 
 class BackboneNCA(nn.Module):
