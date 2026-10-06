@@ -153,6 +153,7 @@ bf16-vs-fp32 gap.
 |---|---|---|---|---|---|---|
 | baseline | upstream layout (`transpose(1, 3)`) | 12.63 | 0.079 | 14.7 | 40.0 GB | 1.00× |
 | layout | Perception on the channels-last state as a free NHWC view with spatially transposed kernels (no `transpose(1, 3)` copies). Reflect pad done in NHWC, cast to bf16 before pad/cat | 4.75 | 0.211 | 39.2 | 29.7 GB | 2.66× |
+| fold | `p0`/`p1`/`fc0` folded into one 3×3 conv, built each forward from the existing weights. `fc1`'s image-channel rows are zeroed, so `dx = 0` there and the re-injection `cat` goes away. 98k → 74k MAC/pixel/step (TFLOP/s still counts the unfolded FLOPs). On GPU in true fp32 (TF32 off) it matches the baseline to 9e-8. | 3.21 | 0.312 | 58.0 | 19.4 GB | 3.94× |
 
 ## Results
 

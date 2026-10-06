@@ -82,29 +82,51 @@ class BackboneNCA(nn.Module):
             padding_mode="reflect",
         )
 
-    def perceive(self, x: torch.Tensor) -> torch.Tensor:
-        """Channels-last ``x`` -> channels-last ``[x | p0(x) | p1(x)]``.
+    def folded_weights(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """The update rule as ``(kernel, bias, fc1_weight)``, built from the upstream parameters.
 
-        Upstream runs ``p0``/``p1`` on ``x.transpose(1, 3)``, i.e. on the
-        H/W-transposed grid. A convolution on the transposed grid equals a
-        convolution on the original grid with spatially transposed kernels
-        (reflect padding commutes with the transpose), so we keep the state
-        channels-last and hand cuDNN a free NHWC view instead of a transposed
-        layout it has to copy. Same function, same weights.
+        Upstream computes ``fc0(cat(x, p0(x), p1(x)))`` on ``x.transpose(1, 3)``,
+        i.e. on the H/W-transposed grid. That is linear in ``x``, so it equals a
+        single 3x3 conv with reflect padding, with kernel
+        ``fc0_p0 @ p0 + fc0_p1 @ p1 (+ fc0_x at the centre tap)`` and bias
+        ``fc0.bias + fc0_p0 @ p0.bias + fc0_p1 @ p1.bias``. A conv on the
+        transposed grid equals a conv on the original grid with spatially
+        transposed kernels (reflect padding commutes with the transpose), so
+        the state stays channels-last and cuDNN gets a free NHWC view.
+
+        ``fc1``'s rows for the image channels are zeroed: their update is
+        discarded by upstream's re-injection, so ``dx`` is exactly 0 there.
+
+        Built in fp32 (outside autocast) once per ``forward``; gradients flow to
+        the original parameters, so the state_dict is unchanged.
         """
-        # The convs and fc0 cast to the autocast dtype anyway; casting before
-        # padding and concatenating gives the same values with half the traffic.
-        x = x.to(_compute_dtype(x))
-        padded = _reflect_pad_hw(x).permute(0, 3, 1, 2)
-        p0 = F.conv2d(padded, self.p0.weight.transpose(2, 3), self.p0.bias)
-        p1 = F.conv2d(padded, self.p1.weight.transpose(2, 3), self.p1.bias)
-        return torch.cat((x, p0.permute(0, 2, 3, 1), p1.permute(0, 2, 3, 1)), 3)
+        with torch.autocast(self.fc0.weight.device.type, enabled=False):
+            w_x, w_p0, w_p1 = self.fc0.weight.split(self.channel_n, dim=1)
+            kernel = torch.einsum("hd,dcij->hcji", w_p0, self.p0.weight)
+            kernel = kernel + torch.einsum("hd,dcij->hcji", w_p1, self.p1.weight)
+            kernel = kernel + F.pad(w_x[..., None, None], (1, 1, 1, 1))
+            bias = self.fc0.bias + w_p0 @ self.p0.bias + w_p1 @ self.p1.bias
+            fc1_weight = F.pad(
+                self.fc1.weight[self.input_channels :], (0, 0, self.input_channels, 0)
+            )
+        return kernel, bias, fc1_weight
 
-    def update(self, x: torch.Tensor, fire_rate: float | None = None) -> torch.Tensor:
+    def update(
+        self,
+        x: torch.Tensor,
+        fire_rate: float | None = None,
+        weights: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
+        """One step on a channels-last state. The image channels are left as is."""
         if fire_rate is None:
             fire_rate = self.fire_rate
+        kernel, bias, fc1_weight = self.folded_weights() if weights is None else weights
 
-        dx = self.fc1(F.relu(self.fc0(self.perceive(x))))
+        # The conv casts to the autocast dtype anyway; casting before padding
+        # gives the same values with half the traffic.
+        padded = _reflect_pad_hw(x.to(_compute_dtype(x)))
+        hidden = F.conv2d(padded.permute(0, 3, 1, 2), kernel, bias)
+        dx = F.linear(F.relu(hidden).permute(0, 2, 3, 1), fc1_weight)
 
         # Deviation: upstream draws the mask on the CPU generator and copies it
         # to the device. Same distribution; identical to upstream on CPU.
@@ -122,12 +144,11 @@ class BackboneNCA(nn.Module):
         steps: int = 64,
         fire_rate: float | None = None,
     ) -> torch.Tensor:
+        # update() leaves the image channels untouched (dx is exactly 0 there),
+        # which is upstream's re-injection of x[..., :input_channels].
+        weights = self.folded_weights()
         for _ in range(steps):
-            x_next = self.update(x, fire_rate)
-            x = torch.cat(
-                (x[..., : self.input_channels], x_next[..., self.input_channels :]),
-                3,
-            )
+            x = self.update(x, fire_rate, weights)
         return x
 
 

@@ -135,11 +135,14 @@ def test_train_mode_runs_a_single_pass():
 def count_updates(encoder: MedNCAEncoder) -> list[int]:
     calls = [0]
 
-    def hook(_module, _inputs):
-        calls[0] += 1
-
     for level in encoder.levels.values():
-        level.fc0.register_forward_pre_hook(hook)
+        update = level.update
+
+        def counted(*args, _update=update, **kwargs):
+            calls[0] += 1
+            return _update(*args, **kwargs)
+
+        level.update = counted
     return calls
 
 
