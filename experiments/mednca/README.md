@@ -158,6 +158,13 @@ bf16-vs-fp32 gap.
 | mask | Fire mask applied in bf16 (`dx * mask`, exact for a 0/1 mask) instead of upcasting `dx` to fp32 first | 2.47 | 0.404 | 75.2 | 19.7 GB | 5.11× |
 | conv-relu | Conv + bias + ReLU as one cuDNN kernel (`torch.cudnn_convolution_relu`) in an autograd Function with an explicit backward (`threshold_backward` + `convolution_backward`). Removes the separate bias-add and ReLU passes over the 128-channel hidden map. One bf16 rounding instead of two. Plain conv + ReLU off CUDA. Traces under `torch.compile(backend="aot_eager")` with identical results. | 2.09 | 0.479 | 89.1 | 19.5 GB | 6.05× |
 
+Profile at `conv-relu` (2.06 s of device time): elementwise 35% (mixed fp32+bf16 residual
+add, mask multiplies, fp32 gradient accumulation, `threshold_backward`), conv 30%,
+GEMM (`fc1`) 12%, copies 10%, casts 9% (pad forward/backward). The conv + GEMM share
+rose from 11% to 42%. The rest is memory-bound pointwise work around the fp32 state. Eager
+mode can't fuse it further; the next candidate is `torch.compile` of `_nca_step` (the fire
+mask is already drawn outside it, so eager RNG and checkpoint replay are unaffected).
+
 Tried and not kept:
 - `torch.addcmul(x, dx, mask)` for the masked residual: bit-identical but no faster
   (2.54 s/iter), because the mixed-dtype kernel is not vectorized and backward adds copies.
