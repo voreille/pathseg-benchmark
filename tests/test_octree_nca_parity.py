@@ -41,11 +41,21 @@ def upstream_backbone_cls():
         pytest.skip(f"Upstream OctreeNCA checkout not found at {OCTREENCA_REPO}.")
     pytest.importorskip("einops")
 
+    # Upstream Med-NCA's checkout also has a top-level ``src`` package; set any
+    # cached one aside so ``src`` resolves to OctreeNCA here, and restore it.
+    cached = {
+        name: sys.modules.pop(name)
+        for name in list(sys.modules)
+        if name == "src" or name.startswith("src.")
+    }
     sys.path.insert(0, str(OCTREENCA_REPO))
     try:
         module = importlib.import_module("src.models.Model_BasicNCA2D_fast")
     finally:
         sys.path.remove(str(OCTREENCA_REPO))
+        for name in [n for n in sys.modules if n == "src" or n.startswith("src.")]:
+            del sys.modules[name]
+        sys.modules.update(cached)
     return module.BasicNCA2DFast
 
 
