@@ -6,7 +6,7 @@
 logits `B×K×H×W` at input resolution) trained by `pathseg.training.semantic.SemanticTraining`
 via LightningCLI configs. Data, transforms, tiling/stitching (`GridPadTiler`), losses,
 and metrics are shared across models. That shared pipeline is what makes results
-comparable. **Do not modify it on this branch.**
+comparable. **Do not change its behaviour on this branch** (additive extensions: see "Conventions").
 
 ## Goal of this branch
 Add Med-NCA (Kalkhof et al. 2023) as a benchmark model such that, for the benchmark
@@ -193,7 +193,18 @@ baseline config with only the changes above.
    seed.
 
 ## Conventions
-- New files only. No edits to shared benchmark code; if one seems needed, stop and ask.
+- Shared benchmark code (data, transforms, tiler, losses, metrics, `SemanticTraining`):
+  existing behaviour is frozen, so every model already in the table must give the same
+  results.
+  - **Allowed without asking (additive):** new classes or functions, and new entries in
+    existing builders/registries under a new name (e.g. a new `loss_name` branch in
+    `build_criterion`). Existing names, defaults and signatures stay unchanged. Add a test
+    for the new entry and log it in `experiments/mednca/README.md`.
+  - **Stop and ask:** anything that changes what existing code computes, its defaults or
+    signatures, and anything touching evaluation (tiler, stitching, metrics, data splits).
+  - Prefer extending the shared mechanism over working around it. Don't add a parallel
+    knob that silently overrides an existing config field (like the former
+    `MedNCATraining(loss=...)` vs `loss_name`).
 - Respect the separation of concerns above. Nothing training-only goes into
   `models.architectures`, apart from the approved switches (grad checkpointing,
   `compile_step`, `max_batch_size`).
