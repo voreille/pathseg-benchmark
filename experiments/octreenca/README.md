@@ -70,6 +70,122 @@ precision, step budget and model knobs as Med-NCA Variant B. Only what defines O
   which only fits for sizes divisible by 2⁴. Our tiles (448) are, so this does not arise;
   the port upsamples to the next level's size explicitly.
 
+## The port
+
+- Architecture: `pathseg/models/architectures/octree_nca.py` (`OctreeBackboneNCA`,
+  `OctreeNCAEncoder`, `OctreeNCASegmenter`), on the base shared with Med-NCA in
+  `pathseg/models/nca.py` (`FoldedNCA`: the fused/compiled step; `MultiLevelNCAEncoder`:
+  seed, upscale, `run_level`, checkpointing, `n_eval_runs`, `max_batch_size`).
+  `StateSliceDecoder` is reused from `med_nca.py`.
+- Training module: `pathseg/training/octree_nca.py::OctreeNCATraining`; EMA callback
+  `pathseg/training/callbacks/ema.py::UpstreamEMA`.
+- Configs: `configs/octreenca/ignite_octreenca_upstream.yaml` (`upstream_dice_bce`) and
+  `ignite_octreenca_upstream_celoss.yaml` (`cross_entropy_dice`). They differ only in the
+  loss, like the Med-NCA pair.
+- Tests: `tests/test_octree_nca_parity.py`, `tests/test_octree_nca.py`,
+  `tests/test_octree_nca_training.py`.
+- Sanity script: `experiments/octreenca/sanity_step.py` (throughput, peak memory, overfit).
+
+Run (on the host; `--no_compile` as for Med-NCA):
+
+    pathseg fit -c configs/octreenca/ignite_octreenca_upstream.yaml --data.num_workers=8 --no_compile
+    pathseg fit -c configs/octreenca/ignite_octreenca_upstream_celoss.yaml --data.num_workers=8 --no_compile
+
+The update folds like Med-NCA's: `fc0(cat(x, conv(x)))` is linear in `x`, so the depthwise
+conv and `fc0` become one 3×3 conv, and `fc1` gets zero rows for the image channels. That
+way OctreeNCA runs on the same fused/compiled step as Med-NCA, with upstream's
+`state_dict` (`backbone_ncas.{l}.conv/fc0/fc1`) unchanged.
+
+### What upstream does in training, and what we do
+
+| | Upstream (PESO) | Ours (`OctreeNCATraining`) |
+|---|---|---|
+| Levels / sizes | 5: 320 → 20 | 5: 448 → 224 → 112 → 56 → 28 |
+| Steps | 10, 10, 10, 10, 20 (α·max(H, W) at 20 px) | 10, 10, 10, 10, **28** (the same rule at 28 px) |
+| Training input | Whole patch at every level, no crop | same (whole 448 tile, the inherited `SemanticTraining` step) |
+| Loss | `DiceLoss + BCELoss` per present class, summed | `loss_name: upstream_dice_bce` (same function), or `cross_entropy_dice` in the `_celoss` config |
+| Optimizer | Adam(1.6e-3, (0.9, 0.99)), no weight decay | same |
+| LR schedule | `ExponentialLR(0.9999⁸)` once per epoch (200 steps) | same, every 200 steps (`lr_every_n_steps`) |
+| EMA | decay 0.99, once per epoch, shadow starts at the initial weights, used for evaluation | same (`UpstreamEMA`, every 200 steps); used for validation, test and the checkpoint `state_dict` |
+| Batch | 3 | 20 (as the Med-NCA run) |
+| Length | 2000 epochs × 200 steps = 400k steps (1.2M samples) | 40k steps (800k samples), the Med-NCA budget. The LR ends at 1.6e-3 × 0.9999^(8·200) ≈ 1.36e-3 |
+| `channel_n` / `hidden_size` | 16 (12 hidden) / 64 | **48 (29 hidden)**, as the Med-NCA run / 64 |
+| Inference | One stochastic pass, EMA weights | same, through the benchmark tiler (448 / 224), `n_eval_runs=1` |
+
 ## Deviations from upstream
 
-_Filled in with the port._
+The allowed adaptations are listed in `CLAUDE.md`. "Mirror Med-NCA" was the user's
+choice (2026-10-07).
+
+| # | Deviation | Why |
+|---|---|---|
+| 1 | 16 output channels (IGNITE, background included) instead of 1 binary output | Task |
+| 2 | `channel_n = 48` (3 + 16 + 29 hidden) instead of 16 (3 + 1 + 12 hidden); `hidden_size = 64` kept | Room for 16 outputs; same state size as the Med-NCA Variant B run, so the two NCAs differ in architecture, not state width (user: mirror Med-NCA) |
+| 3 | Levels sized for 448 tiles: 448 → 28, 28 steps at the coarsest level | Tile size. Same 5 levels, ×2 per level, and the paper's α·max(H, W) rule with α = 1 |
+| 4 | Batch 20 instead of 3; upstream's per-epoch LR decay and EMA updates every 200 steps | Mirror the Med-NCA run (batch 20). The 200-step "epoch" keeps upstream's per-step timing, as Med-NCA keeps its per-step γ at batch 20 |
+| 5 | 40k steps (the benchmark budget) instead of 400k | Same budget as Med-NCA. Upstream's lr decay is slow, so the lr barely decays (×0.85) |
+| 6 | Input = RGB / 255 in [0, 1] instead of ImageNet mean/std | Shared benchmark pipeline, as for Med-NCA |
+| 7 | Benchmark augmentations and sampling, not batchgenerators | Shared benchmark pipeline |
+| 8 | Loss: pixels with the ignore label are left out; BCE from logits. With `_celoss`: the benchmark loss | As Med-NCA (`UpstreamDiceBCELoss`) |
+| 9 | Kernel size fixed at 3 (upstream: configurable per level, 3 in the PESO run); `normalization` fixed at `"none"` (upstream default: BatchNorm, PESO run: `"none"`) | The PESO run; the folded step needs both |
+| 10 | Implementation: the update folded into one 3×3 conv on the NHWC state, the shared fused/compiled step, nearest upscaling to the next level's explicit size | Speed; the same function. Parity holds to 1e-5 (float round-off); upstream weights load |
+| 11 | `n_eval_runs`, `grad_checkpointing_every`, `max_batch_size`, `compile_step` (defaults off; the config sets `max_batch_size: 32`, `compile_step: true`) | The approved Med-NCA knobs |
+| 12 | EMA: Lightning swaps the EMA weights in for validation and copies them into the model at the end of training; the checkpoint's `state_dict` holds the EMA weights (the raw weights are under `current_model_state`) | Upstream evaluates and exports the EMA weights; this makes `pathseg validate/test --ckpt_path` evaluate them too |
+
+Not ported: the CUDA inference kernel (the same outputs, speed/VRAM only), ViTCA backbones,
+loss-weighted patching (`assert False` upstream), and training crops (`patch_sizes`; the
+PESO run uses none).
+
+Parameters at `channel_n = 48`, `hidden_size = 64`: 9,568 per level, 47,840 in total
+(Med-NCA Variant B: 132,544). Upstream PESO: 15,520, which the tests reproduce.
+
+## Deviations from the Med-NCA Variant B config
+
+Base: `configs/mednca/ignite_mednca_upstream.yaml`. Same data, tiles, batch, precision,
+`max_steps`, validation interval, tiler, `channel_n`, `n_eval_runs`, `max_batch_size`,
+`compile_step` and loss switch.
+
+| Key | Med-NCA Variant B | OctreeNCA | Why |
+|---|---|---|---|
+| `model.class_path` | `MedNCATraining` | `OctreeNCATraining` | Upstream trains on the whole patch, plus Adam/EMA |
+| `network` | `MedNCASegmenter`, `hidden_size` 128, `steps` 64, `scale_factor` 4 | `OctreeNCASegmenter`, `hidden_size` 64, `steps` [10, 10, 10, 10, 28] | The model under test, with upstream values |
+| `crop_size` | 112 | (none) | No crops upstream |
+| `betas` / `lr_gamma` | (0.5, 0.5) / 0.9999 every step | (0.9, 0.99) / 0.9999⁸ every 200 steps | Upstream |
+| `ema_decay` / `ema_every_n_steps` | (none) | 0.99 / 200 | Upstream |
+| wandb tags | `med_nca`, `variant_b` | `octree_nca` | |
+
+## Sanity checks (CLAUDE.md)
+
+| # | Check | Status |
+|---|---|---|
+| 1 | Unit: `{"ignite": B×16×T×T}`, no upsampling, param count | Pass (`tests/test_octree_nca.py`): 47,840 parameters at `channel_n` 48, decoder has none; 15,520 for upstream PESO |
+| 2 | Parity vs upstream (`tests/test_octree_nca_parity.py`) | Pass (CPU): seeded init identical, `state_dict` keys identical; backbone and the 5-level chain (train and eval mode) to 1e-5. A transposed kernel or Med-NCA's fire-mask draw fails the test |
+| 3 | `fast_dev_run` through LightningCLI with the real config | Pass on an A100 (`fit`, bf16, `compile_step`, initial loss 20.5) and `validate` on 2 ROIs (448/224 tiler, stitch, metrics, EMA callback outside `fit`) |
+| 4 | Overfit one batch | A100 (shared), full size: one fixed real batch of 4 × 448 (augmented), bf16, `compile_step`, the module's Adam (lr 1.6e-3), 1500 steps (`sanity_step.py --overfit 1500 --batch-size 4`). **`cross_entropy_dice`: pass**, loss 1.03 (step 250) → 0.29–0.39, pixel accuracy 0.28 → 0.82 → 0.91–0.94; still decreasing, not yet ~0 (as for Med-NCA, which flattened at 0.13–0.17). **`upstream_dice_bce`: the loss decreases** (3.80 at step 250 → 1.18) **but the argmax pixel accuracy stays at 0.03–0.10**: the channels of classes absent from the batch get no gradient and win the argmax. This is the hypothesis behind the Med-NCA `_celoss` run, reproduced here on one batch |
+| 5 | Peak GPU memory at the target tile | Batch 20 × 448, bf16, no checkpointing: **17.6 GB** with `compile_step`, 15.1 GB eager. No checkpointing needed |
+| 6 | Stage composition = `forward_feature_maps` | Pass (exact, train mode, fixed seed) |
+| 7 | Grad checkpointing on vs off | Pass: identical outputs and gradients, recomputation verified |
+| – | Compiled step | Pass: compiled = eager on CUDA with TF32 off, used only in CUDA training |
+| – | Training module | Pass (`tests/test_octree_nca_training.py`): full-tile loss through `loss_name` (both losses), gradients reach every level, Adam/ExponentialLR settings, EMA timing, initial-weights blend and EMA weights in the checkpoint |
+
+## Throughput
+
+`experiments/octreenca/sanity_step.py --iters 10` (the module's own `training_step` + Adam on
+a real batch of 20 × 448, bf16, A100). Measured on GPU 0 while **another job kept it at 100 %
+utilisation**, so these are pessimistic:
+
+| `compile_step` | s/iter | it/s | peak memory |
+|---|---|---|---|
+| on | 0.665 | 1.50 | 17.6 GB |
+| off | 0.973 | 1.03 | 15.1 GB |
+
+40k steps at 1.5 it/s take about 7.4 h, so no further optimisation for now. The step is
+the one Med-NCA already optimised (`experiments/mednca/README.md` → Throughput).
+
+## Results
+
+| Model | Loss | val mIoU | test mIoU | Params | Run |
+|---|---|---|---|---|---|
+| OctreeNCA | `upstream_dice_bce` | | | 47.8k | |
+| OctreeNCA | `cross_entropy_dice` | | | 47.8k | |
+| Med-NCA (Variant B) | `upstream_dice_bce` | 0.407 | | 132.5k | `7ro3wqzo` |

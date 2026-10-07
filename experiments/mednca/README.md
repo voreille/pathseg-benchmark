@@ -377,3 +377,4 @@ Tried and not kept:
 | h0-mini + linear (baseline) | IGNITE | 896 | | | | multitask config |
 | Med-NCA (Variant A) | IGNITE | 448 | | | 213.5k | benchmark training protocol |
 | Med-NCA (Variant B) | IGNITE | 448 | | | 132.5k | authors' recipe (crops, Dice+BCE, Adam) |
+| OctreeNCA | IGNITE | 448 | | | 47.8k | authors' recipe (full tile, Adam + EMA), `upstream_dice_bce` / `_celoss`; see `experiments/octreenca/README.md` |
