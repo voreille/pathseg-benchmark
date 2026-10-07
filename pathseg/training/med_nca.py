@@ -6,10 +6,12 @@ Training follows upstream ``Agent_Med_NCA`` / ``Agent_Multi_NCA.batch_step``
 - the coarse level runs on the whole downscaled tile, its state is upscaled,
   and the fine level runs on one random crop per sample (by default the size
   of the coarse level, upstream's ``input_size[0]``);
-- the loss is computed on the fine-level crop only: per-class sigmoid
-  Dice + BCE, summed over the classes present in the batch
-  (``loss="upstream_dice_bce"``), or the benchmark criterion
-  (``loss="benchmark"``);
+- the loss is computed on the fine-level crop only, with the task's
+  criterion from ``tasks.<task>.loss_name``. Upstream's per-class sigmoid
+  Dice + BCE over present classes is ``loss_name: upstream_dice_bce``
+  (``pathseg.training.histo_loss.UpstreamDiceBCELoss``). A task whose crops
+  have no labelled pixel is skipped, and so is the step if no task is left,
+  as upstream skips the update;
 - Adam with betas (0.5, 0.5), no weight decay, and ``ExponentialLR`` stepped
   every batch (``upstream_optimizer=True``).
 
@@ -21,56 +23,14 @@ Deviations from upstream are logged in ``experiments/mednca/README.md``.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import ExponentialLR
 
 from pathseg.models.architectures.med_nca import MedNCASegmenter
 from pathseg.training.semantic import SemanticTraining
-
-
-def upstream_dice_bce_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    ignore_idx: int,
-    smooth: float = 1.0,
-) -> torch.Tensor | None:
-    """Upstream ``DiceBCELoss`` per class, summed over the classes in the batch.
-
-    ``logits``: ``B x K x H x W``; ``targets``: ``B x H x W`` class indices.
-    Upstream applies ``DiceBCELoss`` (sigmoid, BCE mean + Dice with
-    ``smooth=1``, both over the flattened batch) to each output channel whose
-    target contains a positive pixel, and sums the results. Differences:
-    pixels equal to ``ignore_idx`` are left out of both terms (upstream has no
-    ignore label), and BCE is computed from logits (``sigmoid`` +
-    ``binary_cross_entropy`` in upstream; same value, numerically stable).
-
-    Returns ``None`` when no class is present (all pixels ignored): upstream
-    skips the optimizer step in that case.
-    """
-    num_classes = logits.shape[1]
-    valid = targets != ignore_idx
-    one_hot = F.one_hot(targets.masked_fill(~valid, 0), num_classes)
-    one_hot = one_hot.permute(0, 3, 1, 2).to(logits.dtype)
-    valid = valid.unsqueeze(1).to(logits.dtype)
-    one_hot = one_hot * valid
-
-    present = one_hot.sum(dim=(0, 2, 3)) > 0
-    if not bool(present.any()):
-        return None
-
-    dims = (0, 2, 3)
-    probs = torch.sigmoid(logits) * valid
-    intersection = (probs * one_hot).sum(dims)
-    dice = 1 - (2 * intersection + smooth) / (
-        probs.sum(dims) + one_hot.sum(dims) + smooth
-    )
-    bce = F.binary_cross_entropy_with_logits(logits, one_hot, reduction="none")
-    bce = (bce * valid).sum(dims) / valid.sum(dims)
-    return ((bce + dice) * present).sum()
 
 
 class MedNCATraining(SemanticTraining):
@@ -79,8 +39,6 @@ class MedNCATraining(SemanticTraining):
     New init args:
         crop_size: fine-level training crop (pixels, square). ``None`` uses
             the coarse level's size, ``img_size // scale_factor``, as upstream.
-        loss: ``"upstream_dice_bce"`` (upstream) or ``"benchmark"`` (the task's
-            configured criterion, as in Variant A).
         upstream_optimizer: Adam(``lr``, ``betas``) + ExponentialLR(``lr_gamma``)
             stepped every batch, as upstream. ``False`` keeps the benchmark's
             AdamW + poly decay. ``weight_decay``, ``poly_lr_decay_power`` and
@@ -101,7 +59,6 @@ class MedNCATraining(SemanticTraining):
         lr_multiplier_encoder: float = 1.0,
         freeze_encoder: bool = False,
         crop_size: int | None = None,
-        loss: Literal["upstream_dice_bce", "benchmark"] = "upstream_dice_bce",
         upstream_optimizer: bool = True,
         betas: tuple[float, float] = (0.5, 0.5),
         lr_gamma: float = 0.9999,
@@ -122,13 +79,10 @@ class MedNCATraining(SemanticTraining):
             raise TypeError(
                 f"MedNCATraining needs a MedNCASegmenter, got {type(network).__name__}."
             )
-        if loss not in ("upstream_dice_bce", "benchmark"):
-            raise ValueError(f"Unknown loss {loss!r}.")
         if crop_size is not None and crop_size < 1:
             raise ValueError(f"crop_size must be positive, got {crop_size}.")
 
         self.crop_size = None if crop_size is None else int(crop_size)
-        self.loss = loss
         self.upstream_optimizer = bool(upstream_optimizer)
         self.betas = (float(betas[0]), float(betas[1]))
         self.lr_gamma = float(lr_gamma)
@@ -170,13 +124,6 @@ class MedNCATraining(SemanticTraining):
             torch.stack([targets[b, r, c] for b, (r, c) in enumerate(windows)]),
         )
 
-    def crop_loss(
-        self, task: str, logits: torch.Tensor, targets: torch.Tensor
-    ) -> torch.Tensor | None:
-        if self.loss == "benchmark":
-            return self.criteria[task](logits, targets)
-        return upstream_dice_bce_loss(logits.float(), targets, self.ignore_idx)
-
     def training_step(self, batch, batch_idx):
         imgs, targets, task_names, _image_ids = self.unpack_batch(batch)
         if not torch.is_tensor(imgs) or imgs.ndim != 4:
@@ -207,12 +154,12 @@ class MedNCATraining(SemanticTraining):
         losses: list[torch.Tensor] = []
         for task, route in routes.items():
             task_maps = tuple(f.index_select(0, route.device_indices) for f in feature_maps)
-            logits = self.network.decode(task_maps, task=task)[task]
-            loss = self.crop_loss(
-                task, logits, target_crop.index_select(0, route.device_indices)
-            )
-            if loss is None:
+            task_targets = target_crop.index_select(0, route.device_indices)
+            if not bool((task_targets != self.ignore_idx).any()):
+                # Upstream skips the update when no pixel is labelled.
                 continue
+            logits = self.network.decode(task_maps, task=task)[task]
+            loss = self.criteria[task](logits.float(), task_targets)
             losses.append(self.task_specs[task].loss_weight * loss)
             self.log(f"train_{task}_loss", loss, sync_dist=True, batch_size=len(route))
             self.log(
@@ -223,7 +170,6 @@ class MedNCATraining(SemanticTraining):
             )
 
         if not losses:
-            # Upstream skips the update when no class is present.
             return None
         loss_total = torch.stack(losses).sum()
         self.log(

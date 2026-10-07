@@ -1,7 +1,6 @@
 # Med-NCA, IGNITE single task, Variant B with the benchmark loss.
 # Copied from configs/mednca/ignite_mednca_upstream.yaml. The only change is
-# `loss: benchmark`: training uses the task's `loss_name` (softmax CE + Dice)
-# instead of upstream's per-class sigmoid Dice + BCE over present classes,
+# `loss_name: cross_entropy_dice` (softmax CE + Dice, as in Variant A) instead of upstream's per-class sigmoid Dice + BCE over present classes,
 # which leaves the channels of classes absent from a batch unpenalised.
 # Everything else (crops, Adam + ExponentialLR, channel_n, batch) is Variant B.
 # Logged in experiments/mednca/README.md ("Variant B").
@@ -48,7 +47,7 @@ model:
         compile_step: true # torch.compile the NCA step in CUDA training (~1 min compile); run with --no_compile
     tasks:
       ignite:
-        loss_name: cross_entropy_dice # used for training here, since `loss: benchmark`
+        loss_name: cross_entropy_dice # the benchmark loss, as in Variant A
         loss_weight: 1.0
         class_weights: null
     tiler:
@@ -61,7 +60,6 @@ model:
         pad_value: 0.0
     # Upstream recipe (Agent.initialize / Agent_Multi_NCA.batch_step):
     crop_size: null # fine-level crop = coarse size (448 / 4 = 112), as upstream
-    loss: benchmark # tasks.<task>.loss_name (softmax CE + Dice), as in Variant A
     upstream_optimizer: true # Adam + ExponentialLR stepped every batch
     lr: 1.6e-3
     betas: [0.5, 0.5]
