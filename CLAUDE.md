@@ -1,4 +1,4 @@
-# CLAUDE.md — NCA baselines: Med-NCA, then OctreeNCA (branch: `exp/mednca-compartments`)
+# CLAUDE.md — NCA baselines: Med-NCA, then OctreeNCA (branch: `exp/octreenca`; Med-NCA work: `exp/mednca-compartments`, tag `mednca-variant-b`)
 
 ## What this repo is
 `pathseg` is a segmentation **benchmark** for histopathology. Every semantic segmentation model is a
@@ -351,9 +351,14 @@ Protocol:
   - **Loss.** Upstream is binary BCE + Dice, and IGNITE has 16 classes. Use the same
     multiclass loss as the Med-NCA run it is compared with.
   - **Batch size.** The paper uses 3; we use 20.
-- Config `configs/octreenca/ignite_octreenca.yaml` (copied from the Med-NCA Variant B
-  config), wandb tags `octree_nca` + the data/size tags, `job_type: baseline`. Run with
-  `--no_compile`.
+  Decided by the user (2026-10-07): mirror the Med-NCA port wherever possible. The loss is
+  switched by `loss_name`, with two configs like Med-NCA's; batch 20, `channel_n` 48 and
+  the rest of the run setup as Med-NCA Variant B; upstream's per-epoch LR decay and EMA
+  run every 200 steps (one upstream epoch).
+- Configs `configs/octreenca/ignite_octreenca_upstream.yaml` (`upstream_dice_bce`) and
+  `ignite_octreenca_upstream_celoss.yaml` (`cross_entropy_dice`), copied from the Med-NCA
+  Variant B pair. wandb tags `octree_nca` + the data/size tags, `job_type: baseline`. Run
+  with `--no_compile`.
 - Sanity checks: the same list as Med-NCA (unit shape, parity, `fast_dev_run`, overfit one
   batch, peak memory, stage composition = `forward_feature_maps`, checkpointing on = off).
 - Throughput: measure it first. Optimise only if needed, under the same rules as Med-NCA.

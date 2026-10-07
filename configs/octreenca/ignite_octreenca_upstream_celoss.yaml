@@ -1,0 +1,88 @@
+# OctreeNCA, IGNITE single task, the authors' recipe with the benchmark loss.
+# Copied from configs/octreenca/ignite_octreenca_upstream.yaml. The only change is
+# `loss_name: cross_entropy_dice` (softmax CE + Dice) instead of upstream's per-class sigmoid
+# Dice + BCE over present classes, as configs/mednca/ignite_mednca_upstream_celoss.yaml does
+# for Med-NCA. Logged in experiments/octreenca/README.md.
+trainer:
+  precision: "bf16-mixed" # NCA iterates many steps; fp16 can diverge. Use "32-true" without bf16.
+  max_steps: 40000
+  val_check_interval: 1000
+  check_val_every_n_epoch: null
+  accumulate_grad_batches: 1
+  logger:
+    class_path: lightning.pytorch.loggers.wandb.WandbLogger
+    init_args:
+      project: pathseg-benchmark
+      group: IGNITE
+      job_type: baseline
+      tags:
+        - baseline
+        - 20x
+        - 448x448
+        - IGNITE
+        - octree_nca
+        - upstream_recipe
+        - ce_dice_loss
+        - CustomTransforms
+      save_dir: ./wandb
+      log_model: false
+model:
+  class_path: pathseg.training.octree_nca.OctreeNCATraining
+  init_args:
+    network:
+      class_path: pathseg.models.architectures.octree_nca.OctreeNCASegmenter
+      init_args:
+        num_classes_by_task:
+          ignite: 16
+        channel_n: 48 # 3 image + 16 output + 29 hidden: same state as the Med-NCA run (upstream PESO: 12 hidden)
+        hidden_size: 64 # upstream
+        steps: [10, 10, 10, 10, 28] # finest first: 448, 224, 112, 56, 28 px; coarsest = alpha * max(H, W), alpha = 1
+        fire_rate: 0.5
+        n_eval_runs: 1
+        grad_checkpointing_every: null
+        max_batch_size: 32 # caps tiles per forward; validation sends all tiles of an ROI at once
+        compile_step: true # torch.compile the NCA step in CUDA training (~1 min compile); run with --no_compile
+    tasks:
+      ignite:
+        loss_name: cross_entropy_dice # the benchmark loss
+        loss_weight: 1.0
+        class_weights: null
+    tiler:
+      class_path: pathseg.training.tiler.GridPadTiler
+      init_args:
+        tile: 448
+        stride: 224
+        weighted_blend: true # or true
+        pad_mode: "replicate" # optional; nice for images
+        pad_value: 0.0
+    # Upstream recipe (configs/trainers/nca.py, train_peso.py, Agent.py); one upstream epoch = 200 steps:
+    upstream_optimizer: true # Adam + ExponentialLR
+    lr: 1.6e-3
+    betas: [0.9, 0.99]
+    lr_gamma: 0.99920028 # 0.9999 ** 8, once per epoch
+    lr_every_n_steps: 200
+    ema_decay: 0.99 # EMA of the weights, used for validation, test and checkpoints
+    ema_every_n_steps: 200
+    weight_decay: 0.0
+    freeze_encoder: false
+data:
+  class_path: pathseg.datasets.multitask.MultiTaskConcatDataModule
+  init_args:
+    datasets:
+      - name: IGNITE
+        task_name: ignite
+        root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite
+        images_subdir: images
+        masks_subdir: masks_semantic
+        split_csv: metadata.csv
+        sampling_weight: 1.0
+        fold: 0
+    img_size: [448, 448]
+    prefetch_factor: 4
+    num_workers: 0
+    batch_size: 20 # as the Med-NCA run (upstream PESO: 3)
+    transforms:
+      class_path: pathseg.datasets.transforms.CustomTransforms
+      init_args:
+        img_size: [448, 448]
+        scale_range: [0.7, 1.4]
