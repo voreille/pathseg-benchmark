@@ -256,6 +256,9 @@ Rules for further changes:
 - `pathseg validate/test --ckpt_path X`: LightningCLI applies the hparams stored in the
   checkpoint over the YAML and the CLI, silently. To eval with another `n_eval_runs`, patch
   `ckpt["hyper_parameters"]["network"]["init_args"]` in a copy of the checkpoint.
+- Variant B checkpoints from before `5d47a40` (run `7ro3wqzo`) store the removed
+  `MedNCATraining(loss=...)` arg and fail to load (`unexpected keyword argument 'loss'`).
+  Use the `*.migrated.ckpt` copies (`experiments/mednca/migrate_loss_hparams.py`).
 - Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
 - `--trainer.overfit_batches=1` does not fix the batch here (`WeightedRandomSampler` + random augmentations); overfit with a manual loop.
 - In the claude-box sandbox, `/dev/shm` is 64 MB, so DataLoader workers fail or hang
