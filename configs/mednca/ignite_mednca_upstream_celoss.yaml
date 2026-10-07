@@ -1,8 +1,10 @@
-# Med-NCA, IGNITE single task, Variant B (the authors' training recipe).
-# Copied from configs/mednca/ignite_mednca.yaml (Variant A). Differences: the
-# training module (fine level on random crops, upstream Dice+BCE, Adam +
-# ExponentialLR), channel_n, batch size and wandb tags. Evaluation (tiler,
-# metrics) is unchanged. Logged in experiments/mednca/README.md ("Variant B").
+# Med-NCA, IGNITE single task, Variant B with the benchmark loss.
+# Copied from configs/mednca/ignite_mednca_upstream.yaml. The only change is
+# `loss: benchmark`: training uses the task's `loss_name` (softmax CE + Dice)
+# instead of upstream's per-class sigmoid Dice + BCE over present classes,
+# which leaves the channels of classes absent from a batch unpenalised.
+# Everything else (crops, Adam + ExponentialLR, channel_n, batch) is Variant B.
+# Logged in experiments/mednca/README.md ("Variant B").
 trainer:
   precision: "bf16-mixed" # NCA iterates many steps; fp16 can diverge. Use "32-true" without bf16.
   max_steps: 40000
@@ -23,6 +25,7 @@ trainer:
         - med_nca
         - variant_b
         - upstream_recipe
+        - ce_dice_loss
         - CustomTransforms
       save_dir: ./wandb
       log_model: false
@@ -45,7 +48,7 @@ model:
         compile_step: true # torch.compile the NCA step in CUDA training (~1 min compile); run with --no_compile
     tasks:
       ignite:
-        loss_name: cross_entropy_dice # unused: training uses `loss: upstream_dice_bce` below
+        loss_name: cross_entropy_dice # used for training here, since `loss: benchmark`
         loss_weight: 1.0
         class_weights: null
     tiler:
@@ -58,7 +61,7 @@ model:
         pad_value: 0.0
     # Upstream recipe (Agent.initialize / Agent_Multi_NCA.batch_step):
     crop_size: null # fine-level crop = coarse size (448 / 4 = 112), as upstream
-    loss: upstream_dice_bce # per-class sigmoid Dice + BCE, summed over present classes
+    loss: benchmark # tasks.<task>.loss_name (softmax CE + Dice), as in Variant A
     upstream_optimizer: true # Adam + ExponentialLR stepped every batch
     lr: 1.6e-3
     betas: [0.5, 0.5]

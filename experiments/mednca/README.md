@@ -151,6 +151,40 @@ hidden-channel count; batch 20 as upstream.
 | Evaluation with the tiler (448 tiles, stride 224, weighted blend) | Benchmark protocol, identical for all models |
 | A skipped batch (no labelled pixel) may still advance Lightning's scheduler | Rare (all-ignore crop); upstream also skips the scheduler step |
 
+### Loss: benchmark CE + Dice instead of upstream Dice + BCE
+
+`configs/mednca/ignite_mednca_upstream_celoss.yaml` is Variant B with `loss: benchmark` and
+nothing else changed. Upstream's loss sums Dice + BCE over the classes **present** in the
+batch. With one binary output (upstream) that is harmless. With 16 classes and 20 crops of
+112 px, the channels of absent classes get no gradient at all in that batch, so nothing
+keeps them low, and argmax over independent sigmoids can pick them at eval. The benchmark
+loss (softmax CE + Dice) penalises every channel at every pixel and matches the argmax used
+at evaluation.
+
+Note on the configs: `tasks.ignite.loss_name` is only used for training when
+`loss: benchmark`. With `loss: upstream_dice_bce` it is built but unused (no validation
+loss is logged). Both losses are logged as `train_ignite_loss`, but on different scales:
+upstream's is a sum over up to 16 classes (≈ 18.7 at init, 4.65 at the end of `7ro3wqzo`),
+the benchmark's is CE + Dice (≈ 3.7 at init). Don't compare those curves directly.
+
+### Eval-time averaging (`n_eval_runs`)
+
+Variant B run `7ro3wqzo` (40k steps), IGNITE val fold 0, re-validated on an A100:
+
+| `n_eval_runs` | val mIoU |
+|---|---|
+| 1 (logged during training) | 0.4057 |
+| 1 (re-run) | 0.4074 |
+| 8 | 0.4122 |
+
+The difference between the two single-pass runs (0.0017) shows the run-to-run noise from the
+fire masks. Weakest classes: Muscle (13) 0.000, Necrotic tissue (7) 0.12,
+Bronchial epithelium (9) 0.19, Reactive epithelium (2) 0.20.
+
+To change a network init arg at `validate`/`test` time, edit the checkpoint's
+`hyper_parameters["network"]["init_args"]`. `LightningCLI` applies the hyperparameters
+stored in `--ckpt_path` over both the YAML and CLI overrides, and it does so silently.
+
 ### Checks
 
 - `tests/test_med_nca_training.py`:

@@ -251,6 +251,9 @@ Rules for further changes:
   needs a C compiler.
 - In fp32 on an A100, cuDNN convs use TF32 by default. Set
   `torch.backends.cudnn.allow_tf32 = False` when checking equivalence to 1e-7.
+- `pathseg validate/test --ckpt_path X`: LightningCLI applies the hparams stored in the
+  checkpoint over the YAML and the CLI, silently. To eval with another `n_eval_runs`, patch
+  `ckpt["hyper_parameters"]["network"]["init_args"]` in a copy of the checkpoint.
 - Tiler settings can't be overridden on the CLI (jsonargparse yields a `NestedArg`); set them in YAML.
 - `--trainer.overfit_batches=1` does not fix the batch here (`WeightedRandomSampler` + random augmentations); overfit with a manual loop.
 - In the claude-box sandbox, `/dev/shm` is 64 MB, so DataLoader workers fail or hang
