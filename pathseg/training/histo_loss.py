@@ -102,6 +102,53 @@ class CrossEntropyDiceLoss(nn.Module):
         return ce + dice
 
 
+class UpstreamDiceBCELoss(nn.Module):
+    """Med-NCA's training loss: per-class sigmoid Dice + BCE over present classes.
+
+    Upstream (https://github.com/MECLabTUDA/Med-NCA, commit a844a72, MIT License,
+    ``Agent_Multi_NCA.batch_step`` + ``src/losses/LossFunctions.py::DiceBCELoss``)
+    applies ``DiceBCELoss`` (sigmoid; BCE mean + Dice with ``smooth=1``, both over
+    the flattened batch) to each output channel whose target contains a positive
+    pixel, and sums the results. Channels of classes absent from the batch get
+    no loss.
+
+    ``logits``: ``B x K x H x W``; ``target``: ``B x H x W`` class indices.
+    Differences from upstream: pixels equal to ``ignore_index`` are left out of
+    both terms (upstream has no ignore label), and BCE is computed from logits
+    (same value as ``sigmoid`` + ``binary_cross_entropy``, numerically stable).
+    When no pixel is labelled, the loss is zero (with a gradient path); upstream
+    skips the optimizer step instead, which is up to the training loop.
+    """
+
+    def __init__(self, ignore_index: int = 255, smooth: float = 1.0):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.smooth = float(smooth)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        logits = logits.float()
+        num_classes = logits.shape[1]
+        valid = target != self.ignore_index
+        one_hot = F.one_hot(target.masked_fill(~valid, 0), num_classes)
+        one_hot = one_hot.permute(0, 3, 1, 2).to(logits.dtype)
+        valid = valid.unsqueeze(1).to(logits.dtype)
+        one_hot = one_hot * valid
+
+        present = one_hot.sum(dim=(0, 2, 3)) > 0
+        if not bool(present.any()):
+            return logits.sum() * 0.0
+
+        dims = (0, 2, 3)
+        probs = torch.sigmoid(logits) * valid
+        intersection = (probs * one_hot).sum(dims)
+        dice = 1 - (2 * intersection + self.smooth) / (
+            probs.sum(dims) + one_hot.sum(dims) + self.smooth
+        )
+        bce = F.binary_cross_entropy_with_logits(logits, one_hot, reduction="none")
+        bce = (bce * valid).sum(dims) / valid.sum(dims)
+        return ((bce + dice) * present).sum()
+
+
 class BCEDiceLoss(nn.Module):
     def __init__(
         self,
