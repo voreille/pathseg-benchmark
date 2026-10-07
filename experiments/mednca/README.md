@@ -193,6 +193,44 @@ To change a network init arg at `validate`/`test` time, edit the checkpoint's
 `hyper_parameters["network"]["init_args"]`. `LightningCLI` applies the hyperparameters
 stored in `--ckpt_path` over both the YAML and CLI overrides, and it does so silently.
 
+### Level ablations at evaluation (`diagnose_levels.py`)
+
+`experiments/mednca/diagnose_levels.py` reruns the unchanged validation pipeline on a
+checkpoint, with `MedNCAEncoder.forward_state` swapped for another composition of the
+stages (no retraining). Variant B `7ro3wqzo` (migrated checkpoint), IGNITE val fold 0, A100:
+
+| class | full | coarse_only | fine_only | coarse_antialias |
+|---|---|---|---|---|
+| **mIoU** | **0.407** | 0.154 | 0.001 | 0.303 |
+| 0 Background | 0.834 | 0.783 | 0.000 | 0.837 |
+| 1 Tumor epithelium | 0.615 | 0.218 | 0.000 | 0.450 |
+| 2 Reactive epithelium | 0.203 | 0.110 | 0.000 | 0.183 |
+| 3 Stroma | 0.609 | 0.218 | 0.004 | 0.592 |
+| 4 Inflammation | 0.460 | 0.237 | 0.000 | 0.289 |
+| 5 Alveolar tissue | 0.461 | 0.256 | 0.000 | 0.467 |
+| 6 Fatty tissue | 0.386 | 0.003 | 0.000 | 0.339 |
+| 7 Necrotic tissue | 0.116 | 0.047 | 0.000 | 0.055 |
+| 8 Erythrocytes | 0.331 | 0.172 | 0.000 | 0.135 |
+| 9 Bronchial epithelium | 0.181 | 0.001 | 0.000 | 0.110 |
+| 10 Mucus/Plasma/Fluids | 0.375 | 0.034 | 0.000 | 0.485 |
+| 11 Cartilage/Bone | 0.546 | 0.227 | 0.015 | 0.289 |
+| 12 Macrophages | 0.249 | 0.012 | 0.000 | 0.188 |
+| 13 Muscle | 0.000 | 0.000 | 0.000 | 0.017 |
+| 14 Liver | 0.641 | 0.003 | 0.000 | 0.018 |
+| 15 Keratinization | 0.513 | 0.148 | 0.000 | 0.397 |
+
+Reading:
+- `fine_only` ≈ 0: the fine level cannot segment without the coarse state. Every
+  prediction depends on what the coarse level passes down.
+- `coarse_only` is low, but this does **not** show that the coarse level is weak. Med-NCA
+  puts no loss on the coarse level's output channels (only on the fine output), so they
+  are free state, not trained predictions. A clean measure of what the coarse state
+  knows needs a probe trained on it (frozen model).
+- `coarse_antialias` changes the coarse input statistics without retraining, which costs
+  10 pt overall (Liver collapses: 0.64 → 0.02). Mucus (+11 pt) and Muscle are the only
+  gains. Out of distribution, so inconclusive about aliasing itself; it only shows that
+  the coarse level is very sensitive to how its input is downscaled.
+
 ### Checks
 
 - `tests/test_med_nca_training.py`:
