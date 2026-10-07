@@ -277,6 +277,21 @@ Rules for further changes:
   fine with 8 workers.
 - `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
 
+## Next steps (2026-10-07)
+Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest classes are
+Muscle 0.00, Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
+`n_eval_runs=8` gives only +0.5 pt (0.412).
+1. Running: `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
+   Hypothesis: upstream Dice+BCE over *present* classes gives absent-class channels no
+   gradient, so argmax picks them spuriously. Compare per-class IoU with `7ro3wqzo`,
+   especially Muscle.
+2. If context-heavy classes stay weak: 896 tiles (the benchmark value, which removes a
+   deviation; Variant B fits in memory) with 3 levels (1/16, 1/4, 1). The receptive field
+   now is about 64 px (fine) and 256 px (coarse), against a 448 tile. More levels is
+   allowed adaptation 4, and M3D-NCA does the same. It needs an N-level `MedNCAEncoder`.
+3. Final test numbers: decide `n_eval_runs` (1 = upstream, 8 = +0.5 pt), and fill the
+   results table in `experiments/mednca/README.md`.
+
 ## Follow-ups (not now)
 - Learned 1×1 head on hidden channels; more NCA steps.
 - Per-pixel variance over `n_eval_runs` as an uncertainty/QC map.
