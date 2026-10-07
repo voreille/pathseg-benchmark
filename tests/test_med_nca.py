@@ -249,14 +249,14 @@ def test_segmenter_rejects_too_few_channels():
 
 
 def test_plain_step_matches_fused_step():
-    from pathseg.models.architectures import med_nca
+    from pathseg.models import nca
 
     level = make_encoder().levels["fine"]
     x = torch.randn(2, 9, 7, 24, requires_grad=True)
     stochastic = torch.rand(2, 9, 7, 1) > 0.5
 
     outputs, grads = [], []
-    for step in (med_nca._nca_step, med_nca._nca_step_plain):
+    for step in (nca._nca_step, nca._nca_step_plain):
         level.zero_grad(set_to_none=True)
         x.grad = None
         out = step(x, *level.folded_weights(), stochastic, torch.float32)
@@ -271,15 +271,15 @@ def test_plain_step_matches_fused_step():
 
 def use_compiled_steps(monkeypatch) -> list[int]:
     """Replace the compiled step by a counting eager stand-in."""
-    from pathseg.models.architectures import med_nca
+    from pathseg.models import nca
 
     calls = [0]
 
     def fake_compiled(*args):
         calls[0] += 1
-        return med_nca._nca_step_plain(*args)
+        return nca._nca_step_plain(*args)
 
-    monkeypatch.setattr(med_nca, "_get_compiled_nca_step", lambda: fake_compiled)
+    monkeypatch.setattr(nca, "_get_compiled_nca_step", lambda: fake_compiled)
     return calls
 
 
