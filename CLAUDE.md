@@ -282,7 +282,8 @@ Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest cl
 Muscle 0.00, Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
 `n_eval_runs=8` gives only +0.5 pt (0.412). Level ablations (`diagnose_levels.py`, README):
 the fine level fails without the coarse state; the rest is inconclusive without training.
-1. Running on the host: `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
+1. Running on the host since 2026-10-07, on **GPU 1** (don't run GPU jobs there until it ends; check
+   `nvidia-smi`): `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
    Hypothesis: upstream Dice+BCE over *present* classes gives absent-class channels no
    gradient, so argmax picks them spuriously. Compare per-class IoU with `7ro3wqzo`,
    especially Muscle. Record the result in the README.
