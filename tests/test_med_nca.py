@@ -307,8 +307,18 @@ def test_compile_step_is_off_by_default_and_cuda_training_only(monkeypatch):
     assert calls[0] == 2 * 2  # no_grad and eval: eager step
 
 
+@pytest.fixture
+def no_tf32():
+    """True fp32 convs/matmuls: TF32 rounding (eager cuDNN default) exceeds the tolerance."""
+    saved = torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    yield
+    torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32 = saved
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="compiled step is CUDA-only")
-def test_compiled_step_matches_eager_on_cuda():
+def test_compiled_step_matches_eager_on_cuda(no_tf32):
     encoder = make_encoder(steps=5, grad_checkpointing_every=2).cuda().train()
     x = torch.rand(2, 3, 32, 40, device="cuda")
 
