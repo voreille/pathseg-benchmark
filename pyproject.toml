@@ -52,6 +52,7 @@ parquet = [
 [dependency-groups]
 dev = [
   "debugpy>=1.8",
+  "einops>=0.8.2",
   "ipykernel>=6",
   "pre-commit>=4",
   "pytest>=8",
