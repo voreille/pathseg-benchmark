@@ -1,4 +1,4 @@
-# CLAUDE.md — Med-NCA baseline (branch: `exp/mednca-compartments`)
+# CLAUDE.md — NCA baselines: Med-NCA, then OctreeNCA (branch: `exp/mednca-compartments`)
 
 ## What this repo is
 `pathseg` is a segmentation **benchmark** for histopathology. Every semantic segmentation model is a
@@ -280,20 +280,85 @@ Rules for further changes:
 ## Next steps (2026-10-07)
 Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest classes are
 Muscle 0.00, Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
-`n_eval_runs=8` gives only +0.5 pt (0.412).
-1. Running: `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
+`n_eval_runs=8` gives only +0.5 pt (0.412). Level ablations (`diagnose_levels.py`, README):
+the fine level fails without the coarse state; the rest is inconclusive without training.
+1. Running on the host: `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
    Hypothesis: upstream Dice+BCE over *present* classes gives absent-class channels no
    gradient, so argmax picks them spuriously. Compare per-class IoU with `7ro3wqzo`,
-   especially Muscle.
-2. If context-heavy classes stay weak: 896 tiles (the benchmark value, which removes a
-   deviation; Variant B fits in memory) with 3 levels (1/16, 1/4, 1). The receptive field
-   now is about 64 px (fine) and 256 px (coarse), against a 448 tile. More levels is
-   allowed adaptation 4, and M3D-NCA does the same. It needs an N-level `MedNCAEncoder`.
-3. Final test numbers: decide `n_eval_runs` (1 = upstream, 8 = +0.5 pt), and fill the
-   results table in `experiments/mednca/README.md`.
+   especially Muscle. Record the result in the README.
+2. **Current phase: port OctreeNCA** (section below) and compare it with Med-NCA under the
+   same evaluation.
+3. Then improve whichever of the two works better. Candidate changes, with sources:
+   `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
+   starting it, add its allowed deviations to this file with the user. The faithful ports
+   stay as their own benchmark rows.
+4. Final test numbers: decide `n_eval_runs` (1 = upstream, 8 = +0.5 pt), and fill the
+   results tables.
+
+## OctreeNCA port (current phase)
+Goal: a faithful port of OctreeNCA (Lemke et al., BMVC 2025, same lab as Med-NCA) as a
+second NCA baseline, evaluated exactly like every other model. The paper's numbers and
+our notes are in `experiments/nca_literature.md`. It reports OctreeNCA > Med-NCA > UNet on
+H&E at 0.48 µm/px (binary task).
+
+Upstream code:
+- https://github.com/MECLabTUDA/OctreeNCA, cloned at `/home/valentin/external-repos/OctreeNCA`
+  and mounted via `.claude-box.mounts`. Same rules as Med-NCA: **read-only**, never
+  imported by `pathseg` at runtime, commit hash recorded in the README.
+- Before porting, read the code and write down in `experiments/octreenca/README.md`:
+  - the backbone class, perception and update rule, with any differences from Med-NCA's
+    `BackboneNCA`;
+  - how the octree / image pyramid is built, the number of levels and scale per level;
+  - steps per level, including the coarsest-level rule (paper: α₀·max(H, W));
+  - the state layout, `channel_n`, hidden size, fire rate and normalisation;
+  - how the state moves between levels;
+  - the inference path;
+  - the training loop: patches, loss, optimizer, schedule, EMA, batch size, and any batch
+    duplication;
+  - the PESO / pathology config they used.
+  The code wins over the paper and over our notes. Log any discrepancy, and don't assume
+  names.
+- Port the PyTorch model only. The CUDA inference kernel is a speed/VRAM optimisation
+  (same outputs, per the paper); not needed now.
+- Parity test `tests/test_octree_nca_parity.py`: upstream imported from env var
+  `OCTREENCA_REPO` (default `/home/valentin/external-repos/OctreeNCA`), skipped with
+  `pytest.skip` when absent. Same weights and seed must give the same state.
+
+Design (same contract as Med-NCA):
+- `pathseg/models/architectures/octree_nca.py`: `OctreeNCASegmenter(SemanticSegmenter)`
+  with an encoder that exposes composable stages like `MedNCAEncoder` (pyramid, seed, per-
+  level run, upscale; `forward_feature_maps` returns one `B×channel_n×H×W` state), and
+  `StateSliceDecoder` reused from `med_nca.py`. `upsample_logits=False`, no overrides of
+  `encode/decode/forward`.
+- If the backbone matches Med-NCA's, reuse its implementation, including the fast
+  step. Move shared pieces into a base module next to the contracts in `pathseg.models`.
+  Med-NCA's function and `state_dict` must not change: its parity and equivalence tests
+  must still pass.
+- Same separation of concerns. The model-side knobs allowed are the Med-NCA ones:
+  `n_eval_runs`, `grad_checkpointing_every`, `max_batch_size` and `compile_step`. Training
+  -only pieces (EMA, patch sampling, optimizer) go in the Lightning module or a callback.
+- Allowed adaptations are the same list as Med-NCA: RGB input, 16 outputs, `channel_n`
+  large enough for 3 + 16 + hidden, levels/scale for our tile size, gradient
+  checkpointing, `n_eval_runs`. Anything else: stop and ask.
+
+Protocol:
+- Same data and evaluation as Med-NCA Variant B: IGNITE fold 0, 448 tiles, stride 224,
+  same tiler, same metrics. For 448 px, the octree would be 448 → 224 → 112 → 56 → 28;
+  check this against upstream's rule for the coarsest size.
+- Training follows the authors' recipe, as Variant B does for Med-NCA. Two choices need
+  the user before any long run:
+  - **Loss.** Upstream is binary BCE + Dice, and IGNITE has 16 classes. Use the same
+    multiclass loss as the Med-NCA run it is compared with.
+  - **Batch size.** The paper uses 3; we use 20.
+- Config `configs/octreenca/ignite_octreenca.yaml` (copied from the Med-NCA Variant B
+  config), wandb tags `octree_nca` + the data/size tags, `job_type: baseline`. Run with
+  `--no_compile`.
+- Sanity checks: the same list as Med-NCA (unit shape, parity, `fast_dev_run`, overfit one
+  batch, peak memory, stage composition = `forward_feature_maps`, checkpointing on = off).
+- Throughput: measure it first. Optimise only if needed, under the same rules as Med-NCA.
+- Results go in `experiments/octreenca/README.md` and next to Med-NCA in the results table.
 
 ## Follow-ups (not now)
 - Learned 1×1 head on hidden channels; more NCA steps.
 - Per-pixel variance over `n_eval_runs` as an uncertainty/QC map.
-- OctreeNCA (same lab) for large fields of view.
 - Whole-ROI inference without tiling (NCA is local and translation-invariant).
