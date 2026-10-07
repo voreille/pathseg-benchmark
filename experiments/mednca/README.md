@@ -7,7 +7,8 @@ ported as a `SemanticSegmenter` for the pathseg benchmark.
 - Config (Variant A, benchmark protocol): `configs/mednca/ignite_mednca.yaml`
 - Config (Variant B, the authors' training recipe): `configs/mednca/ignite_mednca_upstream.yaml`,
   training module `pathseg/training/med_nca.py` (see [Variant B](#variant-b-the-authors-training-recipe))
-- Tests: `tests/test_med_nca.py`, `tests/test_med_nca_parity.py`, `tests/test_med_nca_training.py`
+- Tests: `tests/test_med_nca.py`, `tests/test_med_nca_parity.py`, `tests/test_med_nca_training.py`,
+  `tests/test_upstream_dice_bce_loss.py`
 
 ## Upstream reference
 
@@ -124,7 +125,7 @@ Read from upstream `Agent_Med_NCA.get_outputs` (training path), `Agent_Multi_NCA
 |---|---|---|
 | Coarse level | Whole image downscaled ×4, 64 steps | same (whole 448 tile → 112) |
 | Fine level | Upscaled state, then **one random crop per sample** of size `input_size[0]` (= coarse size), 64 steps | same: 112 × 112 crop of the 448 tile, same position for state, image and target |
-| Loss | Only on the fine-level crop. `DiceBCELoss` (sigmoid; BCE mean + Dice with `smooth=1`, both over the flattened batch) **per output channel, summed over the channels whose target has a positive pixel**. The step is skipped if none does | same (`upstream_dice_bce_loss`), over the 16 class channels |
+| Loss | Only on the fine-level crop. `DiceBCELoss` (sigmoid; BCE mean + Dice with `smooth=1`, both over the flattened batch) **per output channel, summed over the channels whose target has a positive pixel**. The step is skipped if none does | same (`loss_name: upstream_dice_bce`, `pathseg.training.histo_loss.UpstreamDiceBCELoss`), over the 16 class channels |
 | Optimizer | One `Adam(lr=1.6e-3, betas=(0.5, 0.5))` per level, no weight decay | One Adam over both levels with the same settings (identical: Adam is per-parameter) |
 | LR schedule | `ExponentialLR(γ=0.9999)`, stepped after **every batch** | same (`interval: step`) |
 | Batch size | 20 (notebook) | 20 |
@@ -153,17 +154,24 @@ hidden-channel count; batch 20 as upstream.
 
 ### Loss: benchmark CE + Dice instead of upstream Dice + BCE
 
-`configs/mednca/ignite_mednca_upstream_celoss.yaml` is Variant B with `loss: benchmark` and
-nothing else changed. Upstream's loss sums Dice + BCE over the classes **present** in the
+`configs/mednca/ignite_mednca_upstream_celoss.yaml` is Variant B with
+`loss_name: cross_entropy_dice` and nothing else changed. Upstream's loss sums Dice + BCE over the classes **present** in the
 batch. With one binary output (upstream) that is harmless. With 16 classes and 20 crops of
 112 px, the channels of absent classes get no gradient at all in that batch, so nothing
 keeps them low, and argmax over independent sigmoids can pick them at eval. The benchmark
 loss (softmax CE + Dice) penalises every channel at every pixel and matches the argmax used
 at evaluation.
 
-Note on the configs: `tasks.ignite.loss_name` is only used for training when
-`loss: benchmark`. With `loss: upstream_dice_bce` it is built but unused (no validation
-loss is logged). Both losses are logged as `train_ignite_loss`, but on different scales:
+The training loss is chosen by `tasks.<task>.loss_name` only, as for every other model.
+`upstream_dice_bce` is registered in the shared `build_criterion`
+(`pathseg/training/semantic_common.py`, an additive change approved by the user), next to
+`cross_entropy` and `cross_entropy_dice`. Until commit `5d47a40`, `MedNCATraining` had a
+separate `loss` init arg that bypassed `loss_name`. Checkpoints saved with it (`7ro3wqzo`) no
+longer load through `LightningCLI`. Use the `*.migrated.ckpt` copies written by
+`experiments/mednca/migrate_loss_hparams.py`: on validation, `7ro3wqzo`'s migrated checkpoint
+gives the same 0.4074 mIoU as the original.
+
+Both losses are logged as `train_ignite_loss`, but on different scales:
 upstream's is a sum over up to 16 classes (≈ 18.7 at init, 4.65 at the end of `7ro3wqzo`),
 the benchmark's is CE + Dice (≈ 3.7 at init). Don't compare those curves directly.
 
@@ -188,12 +196,15 @@ stored in `--ckpt_path` over both the YAML and CLI overrides, and it does so sil
 ### Checks
 
 - `tests/test_med_nca_training.py`:
-  - the loss matches upstream `DiceBCELoss` summed over present classes (imported from
-    the upstream checkout, skipped without it);
-  - ignored pixels are left out, and all-ignored batches are skipped;
+  - the training step uses the task's criterion from `loss_name`, on the crop;
+  - all-ignored batches are skipped (both losses);
   - the crop uses the same position for state, image and target;
   - a training step backpropagates into both levels;
   - the optimizer and scheduler use upstream settings.
+- `tests/test_upstream_dice_bce_loss.py`: the loss matches upstream `DiceBCELoss` summed over
+  present classes (imported from the upstream checkout, skipped without it); ignored pixels
+  are left out; absent classes get no gradient; `build_criterion` returns it. Value and
+  gradient are bit-identical to the previous `upstream_dice_bce_loss` function.
 - `fast_dev_run` through LightningCLI with the real config on an A100 (train + validation):
   pass. Initial loss 18.7 (≈ 16 present classes × ~1.2).
 - Step throughput (synthetic batch 20 × 448, bf16, A100): **4.49 it/s with `compile_step`**

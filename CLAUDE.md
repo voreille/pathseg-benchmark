@@ -100,8 +100,10 @@ Med-NCA.** Variant A trained, but converged slowly. The user wants training as c
 the authors as possible: `configs/mednca/ignite_mednca_upstream.yaml`. Decisions made by
 the user, which go beyond the spec above:
 - Loss: upstream per-class sigmoid Dice + BCE, summed over the classes present
-  (`loss: upstream_dice_bce`), not the inherited benchmark loss (`loss: benchmark` is
-  still available). Only training uses it; evaluation is unchanged.
+  (`tasks.ignite.loss_name: upstream_dice_bce`), not the benchmark loss
+  (`cross_entropy_dice`, in `ignite_mednca_upstream_celoss.yaml`). Only training uses
+  it; evaluation is unchanged. The user approved adding it to the shared
+  `build_criterion` (2026-10-07), so `loss_name` is the only loss switch.
 - 448 tiles with a 112 fine-level crop (= coarse size, as upstream), not 896 / 224.
 - `channel_n: 48` (29 hidden channels, like upstream's 30), not 64. Batch 20 (upstream).
 - Upstream optimizer: Adam lr 1.6e-3, betas (0.5, 0.5), no weight decay,
