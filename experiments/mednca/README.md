@@ -175,6 +175,13 @@ Both losses are logged as `train_ignite_loss`, but on different scales:
 upstream's is a sum over up to 16 classes (≈ 18.7 at init, 4.65 at the end of `7ro3wqzo`),
 the benchmark's is CE + Dice (≈ 3.7 at init). Don't compare those curves directly.
 
+**Result (run `58pyapml`, 40k steps, 2026-10-08): val mIoU 0.383, below the 0.406 of
+`7ro3wqzo`** (both single-pass values logged during training). CE + Dice is lower on 12 of 16
+classes. It is higher only on Mucus (0.25) and Bronchial epithelium (9: 0.08 vs 0.05 logged).
+The absent-class hypothesis doesn't explain the weak classes, and Dice + BCE is not the
+problem for Med-NCA. Muscle (13) is 0 in both runs, as expected: fold 0's training split
+has no Muscle (that is how the data are shipped; we keep it).
+
 ### Eval-time averaging (`n_eval_runs`)
 
 Variant B run `7ro3wqzo` (40k steps), IGNITE val fold 0, re-validated on an A100:
@@ -186,7 +193,8 @@ Variant B run `7ro3wqzo` (40k steps), IGNITE val fold 0, re-validated on an A100
 | 8 | 0.4122 |
 
 The difference between the two single-pass runs (0.0017) shows the run-to-run noise from the
-fire masks. Weakest classes: Muscle (13) 0.000, Necrotic tissue (7) 0.12,
+fire masks. Weakest classes: Muscle (13) 0.000 (absent from fold 0's training split, so
+expected), Necrotic tissue (7) 0.12,
 Bronchial epithelium (9) 0.19, Reactive epithelium (2) 0.20.
 
 To change a network init arg at `validate`/`test` time, edit the checkpoint's
@@ -376,5 +384,6 @@ Tried and not kept:
 |---|---|---|---|---|---|---|
 | h0-mini + linear (baseline) | IGNITE | 896 | | | | multitask config |
 | Med-NCA (Variant A) | IGNITE | 448 | | | 213.5k | benchmark training protocol |
-| Med-NCA (Variant B) | IGNITE | 448 | | | 132.5k | authors' recipe (crops, Dice+BCE, Adam) |
+| Med-NCA (Variant B) | IGNITE | 448 | 0.407 | | 132.5k | authors' recipe (crops, Dice+BCE, Adam), `7ro3wqzo` |
+| Med-NCA (Variant B, CE + Dice) | IGNITE | 448 | 0.383 | | 132.5k | as above with `cross_entropy_dice`, `58pyapml` |
 | OctreeNCA | IGNITE | 448 | | | 47.8k | authors' recipe (full tile, Adam + EMA), `upstream_dice_bce` / `_celoss`; see `experiments/octreenca/README.md` |
