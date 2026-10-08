@@ -122,7 +122,7 @@ choice (2026-10-07).
 | 1 | 16 output channels (IGNITE, background included) instead of 1 binary output | Task |
 | 2 | `channel_n = 48` (3 + 16 + 29 hidden) instead of 16 (3 + 1 + 12 hidden); `hidden_size = 64` kept | Room for 16 outputs; same state size as the Med-NCA Variant B run, so the two NCAs differ in architecture, not state width (user: mirror Med-NCA) |
 | 3 | Levels sized for 448 tiles: 448 → 28, 28 steps at the coarsest level | Tile size. Same 5 levels, ×2 per level, and the paper's α·max(H, W) rule with α = 1 |
-| 4 | Batch 20 instead of 3, 40k steps instead of 400k; upstream's per-epoch LR decay and EMA updates every **20** steps, i.e. upstream's 2000 epochs rescaled to our run | Mirror the Med-NCA run (batch 20, 40k steps). The first runs kept upstream's 200-step epoch: then the run has only 200 epochs, the LR barely decays and the EMA weights don't work (see "EMA at our run length"). With 20-step epochs, the LR schedule and the EMA horizon (~5 % of training) match upstream's relative to the run. Exact upstream (batch 3 × 400k) was considered: model-only 14.5 it/s, ~12 h per run if data-bound; the user chose batch 20 (2026-10-08) |
+| 4 | Batch 20 instead of 3, 40k steps instead of 400k; upstream's per-epoch LR decay and EMA updates every **20** steps, i.e. upstream's 2000 epochs rescaled to our run | Mirror the Med-NCA run (batch 20, 40k steps). The first runs kept upstream's 200-step epoch: then the run has only 200 epochs, the LR barely decays and the EMA weights don't work (see "EMA at our run length"). With 20-step epochs, the LR schedule and the EMA horizon (~5 % of training) match upstream's relative to the run. **This matches the schedule's shape, not the training:** 40k weight updates instead of 400k (10× fewer; with Adam each update moves the weights by ~lr whatever the batch), and 800k samples instead of 1.2M. `ignite_octreenca_upstream_bs3.yaml` runs the exact upstream batch and length to measure what this costs (see "Batch 20 × 40k vs upstream batch 3 × 400k") |
 | 5 | 40k steps (the benchmark budget) instead of 400k | Same budget as Med-NCA. Upstream's lr decay is slow, so the lr barely decays (×0.85) |
 | 6 | Input = RGB / 255 in [0, 1] instead of ImageNet mean/std | Shared benchmark pipeline, as for Med-NCA |
 | 7 | Benchmark augmentations and sampling, not batchgenerators | Shared benchmark pipeline |
@@ -138,6 +138,26 @@ PESO run uses none).
 
 Parameters at `channel_n = 48`, `hidden_size = 64`: 9,568 per level, 47,840 in total
 (Med-NCA Variant B: 132,544). Upstream PESO: 15,520, which the tests reproduce.
+
+## Batch 20 × 40k vs upstream batch 3 × 400k
+
+The batch-20 runs keep Med-NCA Variant B's budget (40k steps × 20, upstream Med-NCA's batch),
+so the two NCAs are compared at the same cost. Upstream OctreeNCA trains batch 3 × 400k
+steps: 10× more weight updates. The end of a val curve can't tell whether 40k steps are
+enough, because the LR decays to 0.2× and flattens the curve either way. So the question is
+answered by a run, not by the curve:
+
+- `configs/octreenca/ignite_octreenca_upstream_bs3.yaml` (`upstream_dice_bce`): batch 3,
+  400k steps, LR decay and EMA every 200 steps (upstream's epoch, no rescaling),
+  `num_iterations_per_epoch: 10000` (30k samples per Lightning epoch, as at batch 20),
+  validation every 10k and logging every 10 steps (40 validations and 40k logged steps,
+  as at batch 20). wandb tag `batch3`. 300 steps + validation ran without error (sandbox,
+  no workers).
+- Cost: model-only 14.5 it/s at batch 3 (≈ 7.7 h for 400k); data-bound at ~45 samples/s,
+  i.e. ~14 workers with the `.npy` cache. Expect ~8–12 h.
+- Compare its final val mIoU (EMA and raw) with the batch-20 `upstream_dice_bce` run
+  (`guv3jqtv`). If batch 3 is clearly better, it becomes the faithful OctreeNCA row and the
+  batch-20 run stays as the equal-budget comparison with Med-NCA.
 
 ## Deviations from the Med-NCA Variant B config
 

@@ -314,6 +314,10 @@ the fine level fails without the coarse state; the rest is inconclusive without 
      cache (same pixels, 1.34× per worker; already built in `data/fss/ignite/*_npy`). Run with
      `--data.num_workers=16 --no_compile`. Model-only, eager was faster than `compile_step`
      at batch 20 (2.9 vs 2.4 it/s); check in a real run before changing it.
+   - Batch 20 × 40k is 10× fewer weight updates than upstream (400k at batch 3); the
+     rescaled intervals only match the schedule's shape. `ignite_octreenca_upstream_bs3.yaml`
+     (exact upstream batch and length, ~8–12 h, ~14 workers) measures the cost against the
+     batch-20 Dice + BCE run `guv3jqtv` (README → "Batch 20 × 40k vs upstream batch 3 × 400k").
    - Record val mIoU and per-class IoU in both READMEs' results tables.
 3. Then improve whichever of the two works better. Candidate changes, with sources:
    `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
