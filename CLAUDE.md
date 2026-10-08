@@ -280,18 +280,21 @@ Rules for further changes:
 - Compiled-vs-eager CUDA tests need TF32 off (`no_tf32` fixture): eager cuDNN convs use TF32.
 - Shared NCA code lives in `pathseg/models/nca.py` (`FoldedNCA`, `MultiLevelNCAEncoder`); a
   change there affects both models: rerun both parity tests and `check_equivalence.py`.
+- Local wandb runs: `experiments/read_wandb_history.py runs/wandb/run-*-<id>/run-<id>.wandb`
+  prints the val curves (wandb 0.30 has no Python reader for `.wandb` files).
+- IGNITE fold 0: the training split has no Muscle (class 13), so its IoU is 0 for every
+  model. That is how the data are shipped; keep it.
 - `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
 
 ## Next steps (2026-10-08)
 Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest classes are
-Muscle 0.00, Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
+Muscle 0.00 (expected: fold 0's training split has no Muscle; the data ship that way and we
+keep them), Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
 `n_eval_runs=8` gives only +0.5 pt (0.412). Level ablations (`diagnose_levels.py`, README):
 the fine level fails without the coarse state; the rest is inconclusive without training.
-1. Running on the host since 2026-10-07, on **GPU 1** (don't run GPU jobs there until it ends; check
-   `nvidia-smi`): `ignite_mednca_upstream_celoss.yaml` (`loss_name: cross_entropy_dice`).
-   Hypothesis: upstream Dice+BCE over *present* classes gives absent-class channels no
-   gradient, so argmax picks them spuriously. Compare per-class IoU with `7ro3wqzo`,
-   especially Muscle. Record the result in the README.
+1. **Done:** Med-NCA with `cross_entropy_dice` (`58pyapml`) reached val mIoU 0.383, below
+   Dice + BCE (0.406). The absent-class hypothesis is refuted, and the loss is not the
+   bottleneck (README → "Loss").
 2. **OctreeNCA port: done** (2026-10-08, branch `exp/octreenca`; details and checks in
    `experiments/octreenca/README.md`). **Current phase: train it** and compare it with Med-NCA
    under the same evaluation. The user launches the runs on the host:
@@ -301,6 +304,12 @@ the fine level fails without the coarse state; the rest is inconclusive without 
      0.03–0.10 argmax accuracy (the absent-class problem of item 1).
    - Then `ignite_octreenca_upstream.yaml` (`upstream_dice_bce`), the faithful row next to
      `7ro3wqzo`. Skip it only if both CE runs show Dice + BCE is the problem.
+   - Both runs are running on the host (`jd1vbzbz` CE, `2q9vrks3` Dice + BCE, 2026-10-08).
+     **Their wandb val curves (~0.03) are the EMA weights, which don't work at our run
+     length.** The raw weights reach ~0.30 at 18k steps, on par with Med-NCA (README →
+     "EMA at our run length"). Evaluate the raw weights: copy the checkpoint and set
+     `state_dict = current_model_state`. Next runs: `ema_decay: null` or a rescaled EMA,
+     to be decided with the user.
    - Record val mIoU and per-class IoU in both READMEs' results tables. A checkpoint's
      `state_dict` holds the EMA weights (the raw ones are under `current_model_state`).
    - Throughput: 1.5 it/s at batch 20 × 448 on a shared A100 (≈ 7.4 h for 40k steps),
