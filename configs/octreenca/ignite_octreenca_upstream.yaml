@@ -3,7 +3,7 @@
 # identical wherever possible: data, tiles, batch, precision, step budget, loss switch,
 # channel_n, evaluation (tiler, metrics). Differences: the network (OctreeNCASegmenter,
 # upstream PESO levels/steps/hidden size), the training module (full tile, no crops,
-# upstream Adam + ExponentialLR per 200 steps, weight EMA) and wandb tags.
+# upstream Adam + ExponentialLR per 20 steps (rescaled epoch), weight EMA) and wandb tags.
 # Logged in experiments/octreenca/README.md.
 trainer:
   precision: "bf16-mixed" # NCA iterates many steps; fp16 can diverge. Use "32-true" without bf16.
@@ -56,14 +56,14 @@ model:
         weighted_blend: true # or true
         pad_mode: "replicate" # optional; nice for images
         pad_value: 0.0
-    # Upstream recipe (configs/trainers/nca.py, train_peso.py, Agent.py); one upstream epoch = 200 steps:
+    # Upstream recipe (configs/trainers/nca.py, train_peso.py, Agent.py); upstream: 2000 epochs of 200 steps; here one epoch = 20 steps (2000 in 40k):
     upstream_optimizer: true # Adam + ExponentialLR
     lr: 1.6e-3
     betas: [0.9, 0.99]
-    lr_gamma: 0.99920028 # 0.9999 ** 8, once per epoch
-    lr_every_n_steps: 200
+    lr_gamma: 0.99920028 # 0.9999 ** 8, once per (rescaled) epoch
+    lr_every_n_steps: 20 # upstream epoch rescaled to 1/2000 of the run: 2000 epochs in 40k steps, as upstream
     ema_decay: 0.99 # EMA of the weights, used for validation, test and checkpoints
-    ema_every_n_steps: 200
+    ema_every_n_steps: 20 # EMA horizon ~2k steps (last ~5 %), as upstream; at 200 the EMA weights fail (README)
     weight_decay: 0.0
     freeze_encoder: false
 data:

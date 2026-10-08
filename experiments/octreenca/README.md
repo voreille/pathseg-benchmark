@@ -105,10 +105,10 @@ way OctreeNCA runs on the same fused/compiled step as Med-NCA, with upstream's
 | Training input | Whole patch at every level, no crop | same (whole 448 tile, the inherited `SemanticTraining` step) |
 | Loss | `DiceLoss + BCELoss` per present class, summed | `loss_name: upstream_dice_bce` (same function), or `cross_entropy_dice` in the `_celoss` config |
 | Optimizer | Adam(1.6e-3, (0.9, 0.99)), no weight decay | same |
-| LR schedule | `ExponentialLR(0.9999⁸)` once per epoch (200 steps) | same, every 200 steps (`lr_every_n_steps`) |
-| EMA | decay 0.99, once per epoch, shadow starts at the initial weights, used for evaluation | same (`UpstreamEMA`, every 200 steps); used for validation, test and the checkpoint `state_dict` |
+| LR schedule | `ExponentialLR(0.9999⁸)` once per epoch (200 steps) | same γ, every 20 steps (`lr_every_n_steps`): 2000 decays in 40k steps, as upstream (deviation 4) |
+| EMA | decay 0.99, once per epoch, shadow starts at the initial weights, used for evaluation | same (`UpstreamEMA`), every 20 steps: 2000 updates in 40k steps, as upstream (deviation 4); used for validation, test and the checkpoint `state_dict` |
 | Batch | 3 | 20 (as the Med-NCA run) |
-| Length | 2000 epochs × 200 steps = 400k steps (1.2M samples) | 40k steps (800k samples), the Med-NCA budget. The LR ends at 1.6e-3 × 0.9999^(8·200) ≈ 1.36e-3 |
+| Length | 2000 epochs × 200 steps = 400k steps (1.2M samples) | 40k steps (800k samples), the Med-NCA budget. The LR ends at 1.6e-3 × 0.9999^(8·2000) ≈ 0.32e-3, as upstream (1.36e-3 in the first runs, with 200-step intervals) |
 | `channel_n` / `hidden_size` | 16 (12 hidden) / 64 | **48 (29 hidden)**, as the Med-NCA run / 64 |
 | Inference | One stochastic pass, EMA weights | same, through the benchmark tiler (448 / 224), `n_eval_runs=1` |
 
@@ -122,7 +122,7 @@ choice (2026-10-07).
 | 1 | 16 output channels (IGNITE, background included) instead of 1 binary output | Task |
 | 2 | `channel_n = 48` (3 + 16 + 29 hidden) instead of 16 (3 + 1 + 12 hidden); `hidden_size = 64` kept | Room for 16 outputs; same state size as the Med-NCA Variant B run, so the two NCAs differ in architecture, not state width (user: mirror Med-NCA) |
 | 3 | Levels sized for 448 tiles: 448 → 28, 28 steps at the coarsest level | Tile size. Same 5 levels, ×2 per level, and the paper's α·max(H, W) rule with α = 1 |
-| 4 | Batch 20 instead of 3; upstream's per-epoch LR decay and EMA updates every 200 steps | Mirror the Med-NCA run (batch 20). The 200-step "epoch" keeps upstream's per-step timing, as Med-NCA keeps its per-step γ at batch 20 |
+| 4 | Batch 20 instead of 3, 40k steps instead of 400k; upstream's per-epoch LR decay and EMA updates every **20** steps, i.e. upstream's 2000 epochs rescaled to our run | Mirror the Med-NCA run (batch 20, 40k steps). The first runs kept upstream's 200-step epoch: then the run has only 200 epochs, the LR barely decays and the EMA weights don't work (see "EMA at our run length"). With 20-step epochs, the LR schedule and the EMA horizon (~5 % of training) match upstream's relative to the run. Exact upstream (batch 3 × 400k) was considered: model-only 14.5 it/s, ~12 h per run if data-bound; the user chose batch 20 (2026-10-08) |
 | 5 | 40k steps (the benchmark budget) instead of 400k | Same budget as Med-NCA. Upstream's lr decay is slow, so the lr barely decays (×0.85) |
 | 6 | Input = RGB / 255 in [0, 1] instead of ImageNet mean/std | Shared benchmark pipeline, as for Med-NCA |
 | 7 | Benchmark augmentations and sampling, not batchgenerators | Shared benchmark pipeline |
@@ -150,8 +150,8 @@ Base: `configs/mednca/ignite_mednca_upstream.yaml`. Same data, tiles, batch, pre
 | `model.class_path` | `MedNCATraining` | `OctreeNCATraining` | Upstream trains on the whole patch, plus Adam/EMA |
 | `network` | `MedNCASegmenter`, `hidden_size` 128, `steps` 64, `scale_factor` 4 | `OctreeNCASegmenter`, `hidden_size` 64, `steps` [10, 10, 10, 10, 28] | The model under test, with upstream values |
 | `crop_size` | 112 | (none) | No crops upstream |
-| `betas` / `lr_gamma` | (0.5, 0.5) / 0.9999 every step | (0.9, 0.99) / 0.9999⁸ every 200 steps | Upstream |
-| `ema_decay` / `ema_every_n_steps` | (none) | 0.99 / 200 | Upstream |
+| `betas` / `lr_gamma` | (0.5, 0.5) / 0.9999 every step | (0.9, 0.99) / 0.9999⁸ every 20 steps | Upstream (epoch rescaled, deviation 4) |
+| `ema_decay` / `ema_every_n_steps` | (none) | 0.99 / 20 | Upstream (epoch rescaled, deviation 4) |
 | wandb tags | `med_nca`, `variant_b` | `octree_nca` | |
 
 ## Sanity checks (CLAUDE.md)
@@ -182,6 +182,35 @@ utilisation**, so these are pessimistic:
 40k steps at 1.5 it/s take about 7.4 h, so no further optimisation for now. The step is
 the one Med-NCA already optimised (`experiments/mednca/README.md` → Throughput).
 
+### The real bottleneck is the data pipeline (2026-10-08)
+
+Model only, on an idle A100 (448 px, bf16, forward + backward + Adam, random inputs):
+
+| batch | `compile_step` | it/s | samples/s | peak memory |
+|---|---|---|---|---|
+| 3 | on | 14.5 | 43.5 | 2.7 GB |
+| 3 | off | 8.6 | 25.9 | 2.3 GB |
+| 20 | on | 2.4 | 48.4 | 15.5 GB |
+| 20 | off | 2.9 | 58.4 | 15.1 GB |
+
+The host runs (`--data.num_workers=8`) reached only 1.2–1.4 it/s, with the GPU idle much of
+the time. One worker (single thread) of the shared IGNITE training pipeline produces
+**2.8 samples/s**:
+
+| Stage, per sample | ms |
+|---|---|
+| PNG decode of the whole ROI + one bool mask per class | 104 |
+| color jitter on the whole ROI | 151 |
+| scale jitter + flips (whole ROI and masks) | ~68 |
+| pad + crop to 448 | 37 |
+
+8 workers × 2.8 ≈ 22 samples/s ≈ 1.1 it/s at batch 20, the rate observed. Batch 20 at
+~2.5 it/s needs ~18 workers (the host has 32 physical cores). Options that leave the
+pipeline's output unchanged: more workers, or caching the decoded ROIs. Cropping before
+the augmentations would be ~5–10× faster per worker, but it changes the shared transforms
+(`adjust_contrast` uses the whole-image mean, and the RNG order changes), so it needs the
+user's approval.
+
 ## EMA at our run length: the EMA weights don't work (2026-10-08)
 
 In the first two runs (`2q9vrks3` Dice + BCE, `jd1vbzbz` CE + Dice), the val mIoU logged in
@@ -211,8 +240,10 @@ Consequences:
 - The raw weights are in every checkpoint under `current_model_state`. At the end of
   training, Lightning copies the EMA into the model, so evaluate a copy of the checkpoint
   whose `state_dict` is replaced by `current_model_state`.
-- Before the next run, the EMA has to be disabled (`ema_decay: null`) or rescaled to our
-  length (e.g. decay 0.99 every 10 steps ≈ upstream's 5 % horizon). Undecided.
+- Fix (decided 2026-10-08): the configs now update the EMA and the LR every 20 steps, so
+  40k steps hold upstream's 2000 epochs (deviation 4). The EMA is kept, as in upstream's
+  code (the paper mentions it briefly). Every checkpoint still holds the raw weights, so
+  each run gives the number with and without EMA.
 
 ## Results
 
