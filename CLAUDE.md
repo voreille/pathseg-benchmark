@@ -312,8 +312,10 @@ the fine level fails without the coarse state; the rest is inconclusive without 
      configs now step the LR and the EMA every 20 steps (upstream's 2000 epochs in 40k
      steps); rerun from scratch with batch 20.
    - Training is data-bound: one worker yields 2.8 samples/s, so 8 workers give ~1.1 it/s
-     while the model alone does 2.4–2.9 it/s. Use ~18 workers on the host (32 cores);
-     details in `experiments/octreenca/README.md` → Throughput.
+     while the model alone does 2.4–2.9 it/s. The OctreeNCA configs read a decoded `.npy`
+     cache (`images_npy/`, `masks_semantic_npy/`; same pixels, 1.34× per worker; build it with
+     `python -m pathseg.preprocessing.npy_cache data/fss/ignite`). Use ~16 workers on the
+     host (32 cores); details in `experiments/octreenca/README.md` → Throughput.
    - Record val mIoU and per-class IoU in both READMEs' results tables. A checkpoint's
      `state_dict` holds the EMA weights (the raw ones are under `current_model_state`).
    - Throughput: 1.5 it/s at batch 20 × 448 on a shared A100 (≈ 7.4 h for 40k steps),

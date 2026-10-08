@@ -211,6 +211,22 @@ the augmentations would be ~5–10× faster per worker, but it changes the share
 (`adjust_contrast` uses the whole-image mean, and the RNG order changes), so it needs the
 user's approval.
 
+**Decoded `.npy` cache (done).** `python -m pathseg.preprocessing.npy_cache data/fss/ignite`
+writes `images_npy/` and `masks_semantic_npy/` (2.5 GB, 28 s). The shared `Dataset` loads a
+`.npy` file as the same pixels as the PNG (additive: PNG paths behave as before; a mask
+falls back to `.npy` only when its `.png` is missing). Both OctreeNCA configs point at the
+cache. Measured on 80 IGNITE training samples, one thread:
+
+| | ms/sample | samples/s per worker |
+|---|---|---|
+| PNG | 423–432 | 2.35 |
+| `.npy` | 316–323 | 3.13 (**1.34×**) |
+
+The decode itself drops from ~69 to ~4 ms per ROI. 40 augmented samples under the same seed
+are bit-identical (image, masks, labels, tensor types); `tests/test_dataset_npy_cache.py`
+checks the same on synthetic ROIs. With the cache, batch 20 at ~2.5 it/s needs ~16 workers
+instead of ~21.
+
 ## EMA at our run length: the EMA weights don't work (2026-10-08)
 
 In the first two runs (`2q9vrks3` Dice + BCE, `jd1vbzbz` CE + Dice), the val mIoU logged in

@@ -72,8 +72,8 @@ data:
       - name: IGNITE
         task_name: ignite
         root: /home/valentin/workspaces/pathseg-benchmark/data/fss/ignite
-        images_subdir: images
-        masks_subdir: masks_semantic
+        images_subdir: images_npy # decoded cache, same pixels (python -m pathseg.preprocessing.npy_cache data/fss/ignite)
+        masks_subdir: masks_semantic_npy
         split_csv: metadata.csv
         sampling_weight: 1.0
         fold: 0
