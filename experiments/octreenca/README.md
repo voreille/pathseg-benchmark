@@ -182,10 +182,43 @@ utilisation**, so these are pessimistic:
 40k steps at 1.5 it/s take about 7.4 h, so no further optimisation for now. The step is
 the one Med-NCA already optimised (`experiments/mednca/README.md` → Throughput).
 
+## EMA at our run length: the EMA weights don't work (2026-10-08)
+
+In the first two runs (`2q9vrks3` Dice + BCE, `jd1vbzbz` CE + Dice), the val mIoU logged in
+wandb stayed at 0.02–0.06 through step 20k, with background IoU ≈ 0.01. The CE train loss
+(≈ 1.3) was meanwhile on par with Med-NCA's. Validation uses the EMA weights (deviation 12),
+so `last.ckpt` at step 18k was validated twice, on the same 40 val batches (A100, bf16,
+`n_eval_runs=1`):
+
+| Run | EMA weights (`state_dict`) | Raw weights (`current_model_state`) |
+|---|---|---|
+| `jd1vbzbz` (`cross_entropy_dice`) | 0.035 | **0.294** |
+| `2q9vrks3` (`upstream_dice_bce`) | 0.03 (full val, wandb) | **0.300** |
+
+For reference, Med-NCA Variant B at 20k steps: 0.280 (`58pyapml`, CE + Dice) and 0.340
+(`7ro3wqzo`, Dice + BCE) on the full val set. The subset is representative: EMA on the 40
+batches gives 0.035, and the full-val wandb value is 0.037.
+
+Cause: upstream's EMA (decay 0.99, once per epoch) runs over 2000 epochs, so its horizon
+(~100 epochs) is the last ~5 % of training. We keep the per-epoch timing (every 200 steps)
+but train for only 200 such epochs. The shadow then averages over half the run and still
+holds 0.99¹⁰⁰ ≈ 37 % of the *initial* weights at 20k steps (13 % at 40k). An NCA iterates
+its update 10–28 times per level, so an average of weights from far-apart points of
+training is not a working model.
+
+Consequences:
+- The val curves of these two runs in wandb measure the EMA, not the model being trained.
+- The raw weights are in every checkpoint under `current_model_state`. At the end of
+  training, Lightning copies the EMA into the model, so evaluate a copy of the checkpoint
+  whose `state_dict` is replaced by `current_model_state`.
+- Before the next run, the EMA has to be disabled (`ema_decay: null`) or rescaled to our
+  length (e.g. decay 0.99 every 10 steps ≈ upstream's 5 % horizon). Undecided.
+
 ## Results
 
 | Model | Loss | val mIoU | test mIoU | Params | Run |
 |---|---|---|---|---|---|
-| OctreeNCA | `upstream_dice_bce` | | | 47.8k | |
-| OctreeNCA | `cross_entropy_dice` | | | 47.8k | |
+| OctreeNCA | `upstream_dice_bce` | (running; 0.300 raw at 18k, 40 batches) | | 47.8k | `2q9vrks3` |
+| OctreeNCA | `cross_entropy_dice` | (running; 0.294 raw at 18k, 40 batches) | | 47.8k | `jd1vbzbz` |
+| Med-NCA (Variant B) | `cross_entropy_dice` | 0.383 | | 132.5k | `58pyapml` |
 | Med-NCA (Variant B) | `upstream_dice_bce` | 0.407 | | 132.5k | `7ro3wqzo` |
