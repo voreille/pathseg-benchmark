@@ -275,9 +275,14 @@ Rules for further changes:
 - In the claude-box sandbox, `/dev/shm` is 64 MB, so DataLoader workers fail or hang
   ("unable to allocate shared memory"). Use `--data.num_workers=0` there. The host is
   fine with 8 workers.
+- Med-NCA and OctreeNCA upstream checkouts both have a top-level `src` package; the
+  OctreeNCA parity test sets the cached one aside. Keep that if you add parity tests.
+- Compiled-vs-eager CUDA tests need TF32 off (`no_tf32` fixture): eager cuDNN convs use TF32.
+- Shared NCA code lives in `pathseg/models/nca.py` (`FoldedNCA`, `MultiLevelNCAEncoder`); a
+  change there affects both models: rerun both parity tests and `check_equivalence.py`.
 - `tests/test_semantic_models.py` is broken (imports a missing `pathseg.models.decoders.linear`); run tests by path.
 
-## Next steps (2026-10-07)
+## Next steps (2026-10-08)
 Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest classes are
 Muscle 0.00, Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
 `n_eval_runs=8` gives only +0.5 pt (0.412). Level ablations (`diagnose_levels.py`, README):
@@ -287,8 +292,19 @@ the fine level fails without the coarse state; the rest is inconclusive without 
    Hypothesis: upstream Dice+BCE over *present* classes gives absent-class channels no
    gradient, so argmax picks them spuriously. Compare per-class IoU with `7ro3wqzo`,
    especially Muscle. Record the result in the README.
-2. **Current phase: port OctreeNCA** (section below) and compare it with Med-NCA under the
-   same evaluation.
+2. **OctreeNCA port: done** (2026-10-08, branch `exp/octreenca`; details and checks in
+   `experiments/octreenca/README.md`). **Current phase: train it** and compare it with Med-NCA
+   under the same evaluation. The user launches the runs on the host:
+   - First `configs/octreenca/ignite_octreenca_upstream_celoss.yaml` (`cross_entropy_dice`).
+     It pairs with the Med-NCA CE + Dice run. Overfitting one real batch learned with
+     CE + Dice (pixel acc 0.94), while upstream Dice + BCE lowered its loss but stayed at
+     0.03–0.10 argmax accuracy (the absent-class problem of item 1).
+   - Then `ignite_octreenca_upstream.yaml` (`upstream_dice_bce`), the faithful row next to
+     `7ro3wqzo`. Skip it only if both CE runs show Dice + BCE is the problem.
+   - Record val mIoU and per-class IoU in both READMEs' results tables. A checkpoint's
+     `state_dict` holds the EMA weights (the raw ones are under `current_model_state`).
+   - Throughput: 1.5 it/s at batch 20 × 448 on a shared A100 (≈ 7.4 h for 40k steps),
+     17.6 GB peak, no checkpointing needed.
 3. Then improve whichever of the two works better. Candidate changes, with sources:
    `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
    starting it, add its allowed deviations to this file with the user. The faithful ports
@@ -296,7 +312,7 @@ the fine level fails without the coarse state; the rest is inconclusive without 
 4. Final test numbers: decide `n_eval_runs` (1 = upstream, 8 = +0.5 pt), and fill the
    results tables.
 
-## OctreeNCA port (current phase)
+## OctreeNCA port (done 2026-10-08; spec kept for reference)
 Goal: a faithful port of OctreeNCA (Lemke et al., BMVC 2025, same lab as Med-NCA) as a
 second NCA baseline, evaluated exactly like every other model. The paper's numbers and
 our notes are in `experiments/nca_literature.md`. It reports OctreeNCA > Med-NCA > UNet on
