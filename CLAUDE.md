@@ -308,8 +308,12 @@ the fine level fails without the coarse state; the rest is inconclusive without 
      **Their wandb val curves (~0.03) are the EMA weights, which don't work at our run
      length.** The raw weights reach ~0.30 at 18k steps, on par with Med-NCA (README →
      "EMA at our run length"). Evaluate the raw weights: copy the checkpoint and set
-     `state_dict = current_model_state`. Next runs: `ema_decay: null` or a rescaled EMA,
-     to be decided with the user.
+     `state_dict = current_model_state`. The user stopped both runs (2026-10-08). The
+     configs now step the LR and the EMA every 20 steps (upstream's 2000 epochs in 40k
+     steps); rerun from scratch with batch 20.
+   - Training is data-bound: one worker yields 2.8 samples/s, so 8 workers give ~1.1 it/s
+     while the model alone does 2.4–2.9 it/s. Use ~18 workers on the host (32 cores);
+     details in `experiments/octreenca/README.md` → Throughput.
    - Record val mIoU and per-class IoU in both READMEs' results tables. A checkpoint's
      `state_dict` holds the EMA weights (the raw ones are under `current_model_state`).
    - Throughput: 1.5 it/s at batch 20 × 448 on a shared A100 (≈ 7.4 h for 40k steps),
