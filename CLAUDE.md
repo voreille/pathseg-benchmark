@@ -297,29 +297,24 @@ the fine level fails without the coarse state; the rest is inconclusive without 
    bottleneck (README → "Loss").
 2. **OctreeNCA port: done** (2026-10-08, branch `exp/octreenca`; details and checks in
    `experiments/octreenca/README.md`). **Current phase: train it** and compare it with Med-NCA
-   under the same evaluation. The user launches the runs on the host:
-   - First `configs/octreenca/ignite_octreenca_upstream_celoss.yaml` (`cross_entropy_dice`).
-     It pairs with the Med-NCA CE + Dice run. Overfitting one real batch learned with
-     CE + Dice (pixel acc 0.94), while upstream Dice + BCE lowered its loss but stayed at
-     0.03–0.10 argmax accuracy (the absent-class problem of item 1).
-   - Then `ignite_octreenca_upstream.yaml` (`upstream_dice_bce`), the faithful row next to
-     `7ro3wqzo`. Skip it only if both CE runs show Dice + BCE is the problem.
-   - Both runs are running on the host (`jd1vbzbz` CE, `2q9vrks3` Dice + BCE, 2026-10-08).
-     **Their wandb val curves (~0.03) are the EMA weights, which don't work at our run
-     length.** The raw weights reach ~0.30 at 18k steps, on par with Med-NCA (README →
-     "EMA at our run length"). Evaluate the raw weights: copy the checkpoint and set
-     `state_dict = current_model_state`. The user stopped both runs (2026-10-08). The
-     configs now step the LR and the EMA every 20 steps (upstream's 2000 epochs in 40k
-     steps); rerun from scratch with batch 20.
-   - Training is data-bound: one worker yields 2.8 samples/s, so 8 workers give ~1.1 it/s
-     while the model alone does 2.4–2.9 it/s. The OctreeNCA configs read a decoded `.npy`
-     cache (`images_npy/`, `masks_semantic_npy/`; same pixels, 1.34× per worker; build it with
-     `python -m pathseg.preprocessing.npy_cache data/fss/ignite`). Use ~16 workers on the
-     host (32 cores); details in `experiments/octreenca/README.md` → Throughput.
-   - Record val mIoU and per-class IoU in both READMEs' results tables. A checkpoint's
-     `state_dict` holds the EMA weights (the raw ones are under `current_model_state`).
-   - Throughput: 1.5 it/s at batch 20 × 448 on a shared A100 (≈ 7.4 h for 40k steps),
-     17.6 GB peak, no checkpointing needed.
+   under the same evaluation. The user launches the runs on the host.
+   - First runs (`jd1vbzbz` CE + Dice, `2q9vrks3` Dice + BCE), stopped by the user at ~21k
+     steps: their wandb val curves (~0.03) measure the **EMA weights, which didn't work with
+     200-step epochs** (only 200 epochs in 40k steps; the EMA still held the initial weights).
+     The raw weights reached ~0.30 at 18k (40 val batches), on par with Med-NCA (README →
+     "EMA at our run length"). To evaluate raw weights: copy the checkpoint and set
+     `state_dict = current_model_state`.
+   - Fix (committed): the configs step the LR and the EMA every **20** steps, i.e. upstream's
+     2000 epochs in 40k steps (deviation 4). Batch stays 20 (user's choice over exact upstream
+     batch 3 × 400k). Rerun **both** configs from scratch: `ignite_octreenca_upstream.yaml`
+     (`upstream_dice_bce`, the faithful row next to `7ro3wqzo`) and `_celoss` (pairs with
+     `58pyapml`). Each run gives the EMA and the raw-weights number.
+   - Training is data-bound (CPU augmentations on whole ROIs): the model alone does 2.4–2.9
+     it/s, but 8 workers delivered ~1.1–1.4 it/s. The configs now read the decoded `.npy`
+     cache (same pixels, 1.34× per worker; already built in `data/fss/ignite/*_npy`). Run with
+     `--data.num_workers=16 --no_compile`. Model-only, eager was faster than `compile_step`
+     at batch 20 (2.9 vs 2.4 it/s); check in a real run before changing it.
+   - Record val mIoU and per-class IoU in both READMEs' results tables.
 3. Then improve whichever of the two works better. Candidate changes, with sources:
    `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
    starting it, add its allowed deviations to this file with the user. The faithful ports
