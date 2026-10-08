@@ -10,6 +10,17 @@ from PIL import Image
 from torchvision import tv_tensors
 
 
+def _open(path: Path, mode: str):
+    """PIL image in ``mode``, or, for a ``.npy`` file (decoded cache written by
+    ``pathseg.preprocessing.npy_cache``), the same pixels as a C×H×W uint8 tensor."""
+    if Path(path).suffix != ".npy":
+        return Image.open(path).convert(mode)
+    array = torch.from_numpy(np.load(path))
+    if mode == "RGB":
+        return array.permute(2, 0, 1).contiguous()
+    return array.unsqueeze(0)
+
+
 class Dataset(torch.utils.data.Dataset):
     """
     Dataset for ANORAK images and masks (Mask2Former-style targets).
@@ -42,6 +53,8 @@ class Dataset(torch.utils.data.Dataset):
         for image_id in self.image_ids:
             image_path = list(self.images_directory.glob(f"{image_id}.*"))[0]
             mask_path = self.masks_directory / f"{image_id}.png"
+            if not mask_path.exists() and mask_path.with_suffix(".npy").exists():
+                mask_path = mask_path.with_suffix(".npy")
             data_list.append(
                 {"image_id": image_id, "image_path": image_path, "mask_path": mask_path}
             )
@@ -55,12 +68,10 @@ class Dataset(torch.utils.data.Dataset):
         image_id = self.data_df.index[idx]
 
         image = tv_tensors.Image(
-            Image.open(self.data_df.loc[image_id, "image_path"]).convert("RGB")
+            _open(self.data_df.loc[image_id, "image_path"], "RGB")
         )
 
-        mask = tv_tensors.Mask(
-            Image.open(self.data_df.loc[image_id, "mask_path"]).convert("L")
-        )
+        mask = tv_tensors.Mask(_open(self.data_df.loc[image_id, "mask_path"], "L"))
         mask = torch.squeeze(mask, 0)
 
         unique_labels = torch.unique(mask)
