@@ -318,6 +318,9 @@ the fine level fails without the coarse state; the rest is inconclusive without 
      rescaled intervals only match the schedule's shape. `ignite_octreenca_upstream_bs3.yaml`
      (exact upstream batch and length, ~8–12 h, ~14 workers) measures the cost against the
      batch-20 Dice + BCE run `guv3jqtv` (README → "Batch 20 × 40k vs upstream batch 3 × 400k").
+   - Runs on the host: `guv3jqtv` (batch 20, `upstream_dice_bce`, started 2026-10-08) and
+     `z46nm48t` (batch 3 × 400k, started 2026-10-09). The batch-20 `_celoss` rerun has not
+     been started yet. Val curves: `experiments/read_wandb_history.py`.
    - Record val mIoU and per-class IoU in both READMEs' results tables.
 3. Then improve whichever of the two works better. Candidate changes, with sources:
    `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
