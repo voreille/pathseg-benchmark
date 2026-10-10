@@ -123,7 +123,7 @@ choice (2026-10-07).
 | 2 | `channel_n = 48` (3 + 16 + 29 hidden) instead of 16 (3 + 1 + 12 hidden); `hidden_size = 64` kept | Room for 16 outputs; same state size as the Med-NCA Variant B run, so the two NCAs differ in architecture, not state width (user: mirror Med-NCA) |
 | 3 | Levels sized for 448 tiles: 448 → 28, 28 steps at the coarsest level | Tile size. Same 5 levels, ×2 per level, and the paper's α·max(H, W) rule with α = 1 |
 | 4 | Batch 20 instead of 3, 40k steps instead of 400k; upstream's per-epoch LR decay and EMA updates every **20** steps, i.e. upstream's 2000 epochs rescaled to our run | Mirror the Med-NCA run (batch 20, 40k steps). The first runs kept upstream's 200-step epoch: then the run has only 200 epochs, the LR barely decays and the EMA weights don't work (see "EMA at our run length"). With 20-step epochs, the LR schedule and the EMA horizon (~5 % of training) match upstream's relative to the run. **This matches the schedule's shape, not the training:** 40k weight updates instead of 400k (10× fewer; with Adam each update moves the weights by ~lr whatever the batch), and 800k samples instead of 1.2M. `ignite_octreenca_upstream_bs3.yaml` runs the exact upstream batch and length to measure what this costs (see "Batch 20 × 40k vs upstream batch 3 × 400k") |
-| 5 | 40k steps (the benchmark budget) instead of 400k | Same budget as Med-NCA. Upstream's lr decay is slow, so the lr barely decays (×0.85) |
+| 5 | 40k steps (the benchmark budget) instead of 400k | Same budget as Med-NCA. With the rescaled interval (deviation 4) the LR ends at 0.2× its start, as upstream's (×0.85 in the first runs, with 200-step intervals) |
 | 6 | Input = RGB / 255 in [0, 1] instead of ImageNet mean/std | Shared benchmark pipeline, as for Med-NCA |
 | 7 | Benchmark augmentations and sampling, not batchgenerators | Shared benchmark pipeline |
 | 8 | Loss: pixels with the ignore label are left out; BCE from logits. With `_celoss`: the benchmark loss | As Med-NCA (`UpstreamDiceBCELoss`) |
@@ -158,6 +158,37 @@ answered by a run, not by the curve:
 - Compare its final val mIoU (EMA and raw) with the batch-20 `upstream_dice_bce` run
   (`guv3jqtv`). If batch 3 is clearly better, it becomes the faithful OctreeNCA row and the
   batch-20 run stays as the equal-budget comparison with Med-NCA.
+
+**Result (2026-10-09): batch 3 is +0.9 pt, not clearly better.** Both runs use
+`upstream_dice_bce` and finished their schedule; values are the EMA weights on the full val
+set, one pass (`n_eval_runs=1`), as logged during training.
+
+| | `guv3jqtv` (batch 20 × 40k) | `z46nm48t` (batch 3 × 400k) |
+|---|---|---|
+| val mIoU | 0.387 | **0.396** |
+| val mF1 | 0.520 | 0.536 |
+| Wall time (host, A100) | 5.1 h (16 workers) | 11.5 h (14 workers, ~10.9 it/s) |
+| Curve at the end | +0.9 pt over the last 5k steps (0.378 → 0.387), still rising | flat over the last 10k steps (0.3964 at 390k and 400k) |
+
+Per class, the two runs differ in both directions, by more than the overall gap:
+
+| Class | batch 20 | batch 3 |
+|---|---|---|
+| 1 Tumor epithelium | 0.550 | 0.612 |
+| 4 Inflammation | 0.280 | 0.371 |
+| 8 Erythrocytes | 0.117 | 0.312 |
+| 12 Macrophages | 0.253 | 0.320 |
+| 6 Fatty tissue | 0.352 | 0.253 |
+| 9 Bronchial epithelium | 0.345 | 0.240 |
+| 14 Liver | 0.537 | 0.387 |
+
+(Classes with a difference of 5 pt or more; the full table is in `docs/progress.md`.)
+
+Reading: the 10× more weight updates of upstream's schedule buy under 1 pt mIoU at 2.2× the
+wall time. With one seed per setting and per-class swings of ±10–20 pt, the gap is within
+what a second seed could change. Following the rule above, batch 20 stays the OctreeNCA row
+(equal budget with Med-NCA); `z46nm48t` is reported next to it as the exact-upstream
+reference. Raw weights (`current_model_state`) are not evaluated yet for either run.
 
 ## Deviations from the Med-NCA Variant B config
 
@@ -283,9 +314,18 @@ Consequences:
 
 ## Results
 
-| Model | Loss | val mIoU | test mIoU | Params | Run |
-|---|---|---|---|---|---|
-| OctreeNCA | `upstream_dice_bce` | (running; 0.300 raw at 18k, 40 batches) | | 47.8k | `2q9vrks3` |
-| OctreeNCA | `cross_entropy_dice` | (running; 0.294 raw at 18k, 40 batches) | | 47.8k | `jd1vbzbz` |
-| Med-NCA (Variant B) | `cross_entropy_dice` | 0.383 | | 132.5k | `58pyapml` |
-| Med-NCA (Variant B) | `upstream_dice_bce` | 0.407 | | 132.5k | `7ro3wqzo` |
+IGNITE val fold 0, 448 tiles / stride 224, one stochastic pass (`n_eval_runs=1`), values
+logged during training on the full val set. OctreeNCA values are the **EMA weights**
+(deviation 12); the raw-weights numbers are not evaluated yet.
+
+| Model | Loss | Batch × steps | val mIoU (EMA) | val mIoU (raw) | test mIoU | Params | Run |
+|---|---|---|---|---|---|---|---|
+| OctreeNCA | `upstream_dice_bce` | 20 × 40k | 0.387 | | | 47.8k | `guv3jqtv` |
+| OctreeNCA (exact upstream length) | `upstream_dice_bce` | 3 × 400k | 0.396 | | | 47.8k | `z46nm48t` |
+| OctreeNCA | `cross_entropy_dice` | 20 × 40k | (not started) | | | 47.8k | |
+| Med-NCA (Variant B) | `cross_entropy_dice` | 20 × 40k | 0.383 (no EMA) | | | 132.5k | `58pyapml` |
+| Med-NCA (Variant B) | `upstream_dice_bce` | 20 × 40k | 0.407 (no EMA) | | | 132.5k | `7ro3wqzo` |
+
+Superseded: `2q9vrks3` (`upstream_dice_bce`) and `jd1vbzbz` (`cross_entropy_dice`), the
+first runs with 200-step LR/EMA intervals, stopped by the user. Their EMA weights did not
+work (see "EMA at our run length"); raw weights at 18k: 0.300 and 0.294 (40 val batches).

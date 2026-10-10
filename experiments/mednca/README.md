@@ -383,7 +383,8 @@ Tried and not kept:
 | Model | Task | Tile | val mIoU | test mIoU | Params | Notes |
 |---|---|---|---|---|---|---|
 | h0-mini + linear (baseline) | IGNITE | 896 | | | | multitask config |
-| Med-NCA (Variant A) | IGNITE | 448 | | | 213.5k | benchmark training protocol |
+| Med-NCA (Variant A) | IGNITE | 448 | 0.315 | | 213.5k | benchmark training protocol, `ogemw00x` (stopped by the user at 39.3k of 40k steps; 0.315 at the 39k validation) |
 | Med-NCA (Variant B) | IGNITE | 448 | 0.407 | | 132.5k | authors' recipe (crops, Dice+BCE, Adam), `7ro3wqzo` |
 | Med-NCA (Variant B, CE + Dice) | IGNITE | 448 | 0.383 | | 132.5k | as above with `cross_entropy_dice`, `58pyapml` |
-| OctreeNCA | IGNITE | 448 | | | 47.8k | authors' recipe (full tile, Adam + EMA), `upstream_dice_bce` / `_celoss`; see `experiments/octreenca/README.md` |
+| OctreeNCA | IGNITE | 448 | 0.387 | | 47.8k | authors' recipe (full tile, Adam + EMA), `upstream_dice_bce`, batch 20 × 40k, EMA weights, `guv3jqtv`; see `experiments/octreenca/README.md` |
+| OctreeNCA (exact upstream length) | IGNITE | 448 | 0.396 | | 47.8k | as above at batch 3 × 400k, `z46nm48t` |
