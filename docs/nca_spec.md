@@ -1,0 +1,367 @@
+# NCA baselines: spec and working rules (Med-NCA, OctreeNCA)
+
+This was the branch-level `CLAUDE.md` of `exp/mednca-compartments` (tag `mednca-variant-b`) and
+`exp/octreenca`, moved here when the NCA work was merged into master. The rules still bind
+any change to the NCA code (`pathseg/models/nca.py`, `pathseg/models/architectures/{med_nca,octree_nca}.py`,
+`pathseg/training/{med_nca,octree_nca}.py`). Repo-wide rules (separation of concerns,
+shared-code rule) are in `CLAUDE.md`. Progress and results summary: `docs/nca_baselines.md`;
+details: `experiments/mednca/README.md`, `experiments/octreenca/README.md`.
+
+## Goal
+Add Med-NCA (Kalkhof et al. 2023) as a benchmark model such that, for the benchmark
+run (Variant A below), **the only config change is
+`model.init_args.network.class_path` + its `init_args`** (plus the few
+trainer/optimizer settings listed under "Required config deviations"). Same data,
+same loss, same tiler, same evaluation as the ViT/linear-head baselines.
+
+Order of work:
+1. Single task: IGNITE tissue compartments (16 classes incl. background, 0.5 µm/px).
+2. Single task: ANORAK LUAD growth pattern (7 classes).
+3. Multitask (IGNITE + ANORAK), same pattern as `two_head_linear.IgniteAnorakLinearSegmenter`.
+
+## Design: fit Med-NCA into the SemanticSegmenter contract
+Create the final concrete architecture `pathseg/models/architectures/med_nca.py`. Don't
+hesitate to create base classes if they help (e.g. a generic multi-level NCA). Reusable
+contracts/base classes go next to the existing contracts in `pathseg.models`, following
+the repo's current layout; only the concrete Med-NCA lives in `architectures`. The file
+must contain:
+
+- `MedNCAEncoder(nn.Module)`: the multi-level Med-NCA, exposed as composable stages
+  so that training code can recombine them without re-implementing the model:
+  - `downscale(imgs)`, `init_state(imgs)`, `upscale_state(state, size)`, and
+    `run_level(level, state, imgs)` (runs that level's NCA for its configured steps;
+    the image channels are re-injected and never updated).
+  - The NCA state = [image channels | output channels | hidden]. Image channels = 3
+    (RGB). Output channels = sum of classes over the configured tasks. Verify the
+    upstream layout and keep it.
+  - `forward_feature_maps(imgs) -> tuple[Tensor]` is the **inference composition**:
+    coarse level on the downscaled image, then upscale, then fine level on the full
+    image. It returns `(state_bchw,)`, i.e. ONE `B×channel_n×H×W` map. Convert from
+    channels-last if the NCA works channels-last.
+  - Stochastic firing is part of the model (kept at inference). In eval mode, run
+    `n_eval_runs` passes and return the mean state; in training mode, a single pass.
+    Use the same fire rate at eval as in training.
+  - `set_grad_checkpointing(every: int | None)` (timm-style). It is only active when
+    `self.training and torch.is_grad_enabled()` and does not change the computed
+    function. Use `torch.utils.checkpoint(..., use_reentrant=False)` with the default
+    `preserve_rng_state=True`, so the stochastic fire masks are identical in the
+    recomputation. Training-motivated knobs are allowed in the architecture only
+    when they can't live outside the step loop and don't change the function. The
+    approved ones are this, `compile_step` (see "Training throughput"), and
+    `max_batch_size` (a memory cap for eval). All default off.
+- `StateSliceDecoder(nn.Module)`: no parameters. Maps the state to
+  `{task: state[:, slice_for_task]}`.
+  - Exposes `num_classes_by_task`.
+  - Honors the `task` argument exactly like the existing linear decoder does (read
+    `two_head_linear.py` first and mirror its behavior for `task=None` vs `task="ignite"`).
+- `MedNCASegmenter(SemanticSegmenter)`: builds the encoder + decoder from flat `init_args`
+  (same style as `IgniteAnorakLinearSegmenter`). Calls `super().__init__(...,
+  upsample_logits=False)`. **No overrides of `encode/decode/forward`**; if one becomes
+  necessary, stop and ask.
+
+The output channels are raw logits read straight from the NCA state, as in upstream.
+They are trained by the benchmark's `cross_entropy_dice`, so they are softmax logits.
+Overlap-averaging in `GridPadTiler.stitch` works unchanged. A learned 1×1 conv head on
+the hidden channels would be a different model; it's a follow-up, not the baseline.
+
+## Training variants
+**Variant A: benchmark protocol (do first).** Plain `SemanticTraining`, unchanged. The
+loss is on the full tile; memory is handled by `set_grad_checkpointing` (configured via
+the network init arg `grad_checkpointing_every`). This is the number for the benchmark
+table.
+
+**Variant B: author recipe (only if A underperforms or fails to train).**
+`pathseg/training/med_nca.py` → `MedNCATraining(SemanticTraining)`. It overrides only
+the training step:
+- Run the coarse level on the full tile via the encoder stages, then upscale.
+- Take a random fine-level crop of the state, image, and target (same crop for all
+  three).
+- Run the fine level on the crop and decode with `network.decoder((state_crop,), task)`.
+- Compute the inherited loss on the crop.
+
+Optionally, it switches the optimizer to upstream settings (as init args, documented).
+Validation/test go through the unchanged inherited path, i.e. the full-tile
+`network.forward` with tiler + stitch, so evaluation stays identical to every other
+model. Config change: `model.class_path` → `MedNCATraining` (+ crop size and optimizer
+init args). The network config is the same as Variant A.
+
+**Status (2026-10-06): Variant B is implemented and is the run meant to represent
+Med-NCA.** Variant A trained, but converged slowly. The user wants training as close to
+the authors as possible: `configs/mednca/ignite_mednca_upstream.yaml`. Decisions made by
+the user, which go beyond the spec above:
+- Loss: upstream per-class sigmoid Dice + BCE, summed over the classes present
+  (`tasks.ignite.loss_name: upstream_dice_bce`), not the benchmark loss
+  (`cross_entropy_dice`, in `ignite_mednca_upstream_celoss.yaml`). Only training uses
+  it; evaluation is unchanged. The user approved adding it to the shared
+  `build_criterion` (2026-10-07), so `loss_name` is the only loss switch.
+- 448 tiles with a 112 fine-level crop (= coarse size, as upstream), not 896 / 224.
+- `channel_n: 48` (29 hidden channels, like upstream's 30), not 64. Batch 20 (upstream).
+- Upstream optimizer: Adam lr 1.6e-3, betas (0.5, 0.5), no weight decay,
+  ExponentialLR 0.9999 per step.
+The upstream-vs-ours table and the remaining deviations are in
+`experiments/mednca/README.md` → "Variant B".
+
+## Upstream code
+- Reference implementation: the original Med-NCA repo
+  (https://github.com/MECLabTUDA/Med-NCA), cloned outside this repo at
+  `/home/valentin/external-repos/Med-NCA` and mounted into the sandbox via
+  `.claude-box.mounts`. It is **read-only**: never edit, commit to, or copy it wholesale
+  into this repo. If something there looks incomplete, the maintained successor is
+  https://github.com/MECLabTUDA/M3D-NCA; note any discrepancy, don't silently mix them.
+- Record its commit hash (`git -C /home/valentin/external-repos/Med-NCA rev-parse HEAD`)
+  in `experiments/mednca/README.md`.
+- `pathseg` must never import from that path at runtime: the benchmark has to run
+  without it.
+- We use ONLY the model: the NCA update rule (backbone) and the multi-level forward
+  logic (which lives in the Med-NCA agent). We do NOT use their Agent training loop,
+  Experiment/config system, datasets, or losses.
+- Port the backbone + multi-level forward into `med_nca.py` faithfully (with
+  attribution), keeping upstream defaults (hidden size, steps per level, fire rate,
+  scale factor, perception filters).
+- Add a parity test `tests/test_med_nca_parity.py`: same weights + same seed means our
+  port and upstream produce the same state on a random input. The test imports upstream
+  from the path in env var `MEDNCA_REPO` (default `/home/valentin/external-repos/Med-NCA`)
+  and is skipped via `pytest.skip` when that path doesn't exist.
+- Before porting, read upstream and write down in the README: the backbone class, the
+  agent's inference path, state channel layout, steps per level, the default
+  `channel_n`/`hidden_size`, and the fire rate. Don't assume names.
+
+## Allowed adaptations (the complete list)
+1. Input channels: 3 (RGB) instead of 1 (MRI).
+2. Output channels = 16 (IGNITE), 7 (ANORAK), or 23 (multitask).
+3. `channel_n` large enough for 3 + outputs + hidden. Start at 64 single-task and 96
+   multitask; keep upstream `hidden_size`.
+4. Number of levels / scale factor if needed for large tiles. Upstream 2D is tuned for
+   small images; for 896 px tiles a coarse level at 1/4 is 224 px. Prefer upstream
+   defaults first; log any change.
+5. Gradient checkpointing over NCA steps (see `set_grad_checkpointing`) so that
+   full-tile BPTT fits in Variant A. Upstream's random fine-level crop is a training
+   strategy, so it lives only in Variant B's Lightning module, never in the architecture.
+6. Eval-time averaging of `n_eval_runs` stochastic passes (inside the encoder).
+
+Anything else: stop and ask.
+
+## Required config deviations (keep these minimal and documented)
+- `network.class_path: pathseg.models.architectures.med_nca.MedNCASegmenter`, with
+  `init_args` for: `num_classes_by_task`, `channel_n`, `hidden_size`, `steps`,
+  `fire_rate`, `scale_factor`, `n_eval_runs`, `grad_checkpointing_every`,
+  `max_batch_size`, `compile_step`.
+- `lr_multiplier_encoder: 1.0`. All Med-NCA parameters live in the encoder; the
+  baseline's 0.1 would cripple it. `freeze_encoder: false`. Verify that
+  `SemanticTraining` copes with a decoder that has no parameters (empty param group).
+- `trainer.precision`: NCAs iterate many steps and fp16 can diverge. Use `"bf16-mixed"`
+  if the GPU supports it, else `"32-true"`. Log this.
+- Tile / `img_size`: start with the benchmark's value. If memory forces a smaller tile
+  even with checkpointing, change `data.init_args.img_size`, the transforms `img_size`,
+  and the tiler `tile`/`stride` consistently (stride = tile/2), and log it as a
+  deviation.
+- Optimizer: benchmark defaults (lr 1e-4, wd 0.05, poly decay) in Variant A. Upstream
+  optimizer settings belong to Variant B only.
+- wandb: same `project`. Tags: replace `linear_decoder`/`h0-mini` with `med_nca`, keep
+  the data/size tags. `job_type: baseline`.
+- Single-task runs: keep only the IGNITE entry in `data.init_args.datasets` and only
+  `ignite` in `tasks`.
+
+Config file: `configs/mednca/ignite_mednca.yaml`, copied from the corresponding linear
+baseline config with only the changes above.
+
+## Sanity checks before any long run
+1. Unit: `MedNCASegmenter(...)(torch.rand(2,3,T,T))` returns `{"ignite": 2×16×T×T}`;
+   `ensure_input_resolution` passes without upsampling; print the param count (expect
+   tens of thousands).
+2. Parity test vs upstream passes.
+3. `fast_dev_run` through LightningCLI with the real config (train + val + tiler stitch).
+4. Overfit one batch (loss → ~0). If this fails, the port or channel slicing is wrong.
+5. Peak GPU memory at the target tile size with checkpointing; adjust
+   `grad_checkpointing_every`.
+6. Stage composition: with `xd = downscale(x)`, the manual chain
+   `run_level("fine", upscale_state(run_level("coarse", init_state(xd), xd), x.shape[-2:]), x)`
+   equals `forward_feature_maps(x)` under a fixed seed. Run it in train mode (or with
+   `n_eval_runs=1`), since eval mode averages several passes. This guarantees Variant B
+   trains the same model that inference runs.
+7. Grad checkpointing on vs off gives identical outputs and gradients under a fixed
+   seed.
+
+## Logging
+- One adaptation per commit, clear messages.
+- Log every deviation from upstream and from the baseline config in
+  `experiments/mednca/README.md` (or `experiments/octreenca/README.md`), plus a results table
+  next to the ViT baselines.
+- Nothing training-only goes into `models.architectures`, apart from the approved switches
+  (grad checkpointing, `compile_step`, `max_batch_size`).
+
+## Training throughput (done: 8.3×, 2026-10-06)
+Variant A started at 0.079 it/s (448 px, batch 16, bf16, A100), against 1.44 it/s for
+h0-mini + linear at 896 px. Per iteration Med-NCA needs only ~3× the FLOPs (~185 vs ~63
+TFLOP), so the gap was mostly implementation inefficiency. It now runs at **0.656 it/s
+(1.52 s/iter, 122 effective TFLOP/s, 22 GB peak)**, with the model, `state_dict` and
+protocol unchanged. Per-commit numbers, the profiles and the variants that failed are in
+`experiments/mednca/README.md` → "Throughput".
+
+How the step is implemented now (`pathseg/models/architectures/med_nca.py`):
+- The state stays channels-last `B×H×W×C`. Convs run on the free NHWC view with
+  spatially transposed kernels, which equals upstream's convs on `x.transpose(1, 3)`.
+- `BackboneNCA.folded_weights()` builds, once per `forward`, one 3×3 conv
+  (kernel + bias) from `p0`/`p1`/`fc0`, plus `fc1` with its image-channel rows zeroed
+  (so `dx = 0` there; this replaces the re-injection `cat`). The parameters themselves
+  are untouched.
+- `BackboneNCA.update` draws the fire mask **eagerly**, then calls one of two step
+  functions with the same signature:
+  - `_nca_step` (eager, hand-fused: `_ReflectPadCastHW`, `_CudnnConvBiasReLU`, mask
+    in bf16): the default, and always used in eval / `no_grad` / on CPU.
+  - `torch.compile(_nca_step_plain, dynamic=False, mode="max-autotune-no-cudagraphs")`:
+    used only when `compile_step=True` and in training mode with grad enabled on CUDA.
+    `_nca_step_plain` is the same step in plain ops, because Inductor can't fuse
+    through the hand-written autograd Functions. Keep the two in sync: a test checks
+    that they agree.
+
+Rules for further changes:
+- Profile before optimizing: `experiments/mednca/profile_step.py` (`--compile-step` for
+  the compiled path). Record findings in the README.
+- Allowed: implementation-level rewrites that compute the same function.
+- Constraints: keep parameter names and the state_dict, so checkpoints and upstream
+  weights still load. `tests/test_med_nca_parity.py` (1e-5) and `tests/test_med_nca.py`
+  (checkpointing, composition, compiled = eager) must pass. One optimization per commit,
+  with its measured speedup. Check GPU equivalence against the original code with
+  `experiments/mednca/check_equivalence.py --no-tf32` (and `--compile-step`): fp32 with
+  TF32 off should match to about 1e-7; bf16 should stay within the original's own
+  bf16-vs-fp32 gap (the script prints it).
+- Keep the fire mask outside any compiled region, so the masks and checkpoint replay
+  stay identical to eager.
+- Not allowed without asking: anything that changes the model or the protocol, such
+  as fewer steps, a smaller `channel_n`, or fine-level crops (that is Variant B).
+
+## NCA gotchas
+- `pathseg fit` wraps the model in `torch.compile` unless you pass `--no_compile`. For
+  Med-NCA, always pass `--no_compile`: compilation is done per step by `compile_step`,
+  and a whole-model compile would unroll 2 × 64 steps.
+- `compile_step` needs `dynamic=False`. With dynamic shapes, checkpoint recomputation
+  recompiles and fails the checkpoint metadata check. The first training step takes
+  about 1 min longer (max-autotune; cached in `/tmp/torchinductor_$USER`), and Triton
+  needs a C compiler.
+- In fp32 on an A100, cuDNN convs use TF32 by default. Set
+  `torch.backends.cudnn.allow_tf32 = False` when checking equivalence to 1e-7.
+- Variant B checkpoints from before `5d47a40` (run `7ro3wqzo`) store the removed
+  `MedNCATraining(loss=...)` arg and fail to load (`unexpected keyword argument 'loss'`).
+  Use the `*.migrated.ckpt` copies (`experiments/mednca/migrate_loss_hparams.py`).
+- Med-NCA and OctreeNCA upstream checkouts both have a top-level `src` package; the
+  OctreeNCA parity test sets the cached one aside. Keep that if you add parity tests.
+- Compiled-vs-eager CUDA tests need TF32 off (`no_tf32` fixture): eager cuDNN convs use TF32.
+- Shared NCA code lives in `pathseg/models/nca.py` (`FoldedNCA`, `MultiLevelNCAEncoder`); a
+  change there affects both models: rerun both parity tests and `check_equivalence.py`.
+
+## Next steps (2026-10-08)
+Variant B (`7ro3wqzo`): val mIoU 0.407, below the U-Net baseline. The weakest classes are
+Muscle 0.00 (expected: fold 0's training split has no Muscle; the data ship that way and we
+keep them), Necrosis 0.12, Bronchial epithelium 0.19 and Reactive epithelium 0.20.
+`n_eval_runs=8` gives only +0.5 pt (0.412). Level ablations (`diagnose_levels.py`, README):
+the fine level fails without the coarse state; the rest is inconclusive without training.
+1. **Done:** Med-NCA with `cross_entropy_dice` (`58pyapml`) reached val mIoU 0.383, below
+   Dice + BCE (0.406). The absent-class hypothesis is refuted, and the loss is not the
+   bottleneck (README → "Loss").
+2. **OctreeNCA port: done** (2026-10-08, branch `exp/octreenca`; details and checks in
+   `experiments/octreenca/README.md`). **Current phase: train it** and compare it with Med-NCA
+   under the same evaluation. The user launches the runs on the host.
+   - First runs (`jd1vbzbz` CE + Dice, `2q9vrks3` Dice + BCE), stopped by the user at ~21k
+     steps: their wandb val curves (~0.03) measure the **EMA weights, which didn't work with
+     200-step epochs** (only 200 epochs in 40k steps; the EMA still held the initial weights).
+     The raw weights reached ~0.30 at 18k (40 val batches), on par with Med-NCA (README →
+     "EMA at our run length"). To evaluate raw weights: copy the checkpoint and set
+     `state_dict = current_model_state`.
+   - Fix (committed): the configs step the LR and the EMA every **20** steps, i.e. upstream's
+     2000 epochs in 40k steps (deviation 4). Batch stays 20 (user's choice over exact upstream
+     batch 3 × 400k). Rerun **both** configs from scratch: `ignite_octreenca_upstream.yaml`
+     (`upstream_dice_bce`, the faithful row next to `7ro3wqzo`) and `_celoss` (pairs with
+     `58pyapml`). Each run gives the EMA and the raw-weights number.
+   - Training is data-bound (CPU augmentations on whole ROIs): the model alone does 2.4–2.9
+     it/s, but 8 workers delivered ~1.1–1.4 it/s. The configs now read the decoded `.npy`
+     cache (same pixels, 1.34× per worker; already built in `data/fss/ignite/*_npy`). Run with
+     `--data.num_workers=16 --no_compile`. Model-only, eager was faster than `compile_step`
+     at batch 20 (2.9 vs 2.4 it/s); check in a real run before changing it.
+   - Batch 20 × 40k is 10× fewer weight updates than upstream (400k at batch 3); the
+     rescaled intervals only match the schedule's shape. `ignite_octreenca_upstream_bs3.yaml`
+     (exact upstream batch and length, ~8–12 h, ~14 workers) measures the cost against the
+     batch-20 Dice + BCE run `guv3jqtv` (README → "Batch 20 × 40k vs upstream batch 3 × 400k").
+   - Runs on the host: `guv3jqtv` (batch 20, `upstream_dice_bce`, started 2026-10-08) and
+     `z46nm48t` (batch 3 × 400k, started 2026-10-09). The batch-20 `_celoss` rerun has not
+     been started yet. Val curves: `experiments/read_wandb_history.py`.
+   - Record val mIoU and per-class IoU in both READMEs' results tables.
+3. Then improve whichever of the two works better. Candidate changes, with sources:
+   `experiments/nca_literature.md`. That phase deviates from upstream on purpose: before
+   starting it, add its allowed deviations to this file with the user. The faithful ports
+   stay as their own benchmark rows.
+4. Final test numbers: decide `n_eval_runs` (1 = upstream, 8 = +0.5 pt), and fill the
+   results tables.
+
+## OctreeNCA port (done 2026-10-08; spec kept for reference)
+Goal: a faithful port of OctreeNCA (Lemke et al., BMVC 2025, same lab as Med-NCA) as a
+second NCA baseline, evaluated exactly like every other model. The paper's numbers and
+our notes are in `experiments/nca_literature.md`. It reports OctreeNCA > Med-NCA > UNet on
+H&E at 0.48 µm/px (binary task).
+
+Upstream code:
+- https://github.com/MECLabTUDA/OctreeNCA, cloned at `/home/valentin/external-repos/OctreeNCA`
+  and mounted via `.claude-box.mounts`. Same rules as Med-NCA: **read-only**, never
+  imported by `pathseg` at runtime, commit hash recorded in the README.
+- Before porting, read the code and write down in `experiments/octreenca/README.md`:
+  - the backbone class, perception and update rule, with any differences from Med-NCA's
+    `BackboneNCA`;
+  - how the octree / image pyramid is built, the number of levels and scale per level;
+  - steps per level, including the coarsest-level rule (paper: α₀·max(H, W));
+  - the state layout, `channel_n`, hidden size, fire rate and normalisation;
+  - how the state moves between levels;
+  - the inference path;
+  - the training loop: patches, loss, optimizer, schedule, EMA, batch size, and any batch
+    duplication;
+  - the PESO / pathology config they used.
+  The code wins over the paper and over our notes. Log any discrepancy, and don't assume
+  names.
+- Port the PyTorch model only. The CUDA inference kernel is a speed/VRAM optimisation
+  (same outputs, per the paper); not needed now.
+- Parity test `tests/test_octree_nca_parity.py`: upstream imported from env var
+  `OCTREENCA_REPO` (default `/home/valentin/external-repos/OctreeNCA`), skipped with
+  `pytest.skip` when absent. Same weights and seed must give the same state.
+
+Design (same contract as Med-NCA):
+- `pathseg/models/architectures/octree_nca.py`: `OctreeNCASegmenter(SemanticSegmenter)`
+  with an encoder that exposes composable stages like `MedNCAEncoder` (pyramid, seed, per-
+  level run, upscale; `forward_feature_maps` returns one `B×channel_n×H×W` state), and
+  `StateSliceDecoder` reused from `med_nca.py`. `upsample_logits=False`, no overrides of
+  `encode/decode/forward`.
+- If the backbone matches Med-NCA's, reuse its implementation, including the fast
+  step. Move shared pieces into a base module next to the contracts in `pathseg.models`.
+  Med-NCA's function and `state_dict` must not change: its parity and equivalence tests
+  must still pass.
+- Same separation of concerns. The model-side knobs allowed are the Med-NCA ones:
+  `n_eval_runs`, `grad_checkpointing_every`, `max_batch_size` and `compile_step`. Training
+  -only pieces (EMA, patch sampling, optimizer) go in the Lightning module or a callback.
+- Allowed adaptations are the same list as Med-NCA: RGB input, 16 outputs, `channel_n`
+  large enough for 3 + 16 + hidden, levels/scale for our tile size, gradient
+  checkpointing, `n_eval_runs`. Anything else: stop and ask.
+
+Protocol:
+- Same data and evaluation as Med-NCA Variant B: IGNITE fold 0, 448 tiles, stride 224,
+  same tiler, same metrics. For 448 px, the octree would be 448 → 224 → 112 → 56 → 28;
+  check this against upstream's rule for the coarsest size.
+- Training follows the authors' recipe, as Variant B does for Med-NCA. Two choices need
+  the user before any long run:
+  - **Loss.** Upstream is binary BCE + Dice, and IGNITE has 16 classes. Use the same
+    multiclass loss as the Med-NCA run it is compared with.
+  - **Batch size.** The paper uses 3; we use 20.
+  Decided by the user (2026-10-07): mirror the Med-NCA port wherever possible. The loss is
+  switched by `loss_name`, with two configs like Med-NCA's; batch 20, `channel_n` 48 and
+  the rest of the run setup as Med-NCA Variant B; upstream's per-epoch LR decay and EMA
+  run every 200 steps (one upstream epoch).
+- Configs `configs/octreenca/ignite_octreenca_upstream.yaml` (`upstream_dice_bce`) and
+  `ignite_octreenca_upstream_celoss.yaml` (`cross_entropy_dice`), copied from the Med-NCA
+  Variant B pair. wandb tags `octree_nca` + the data/size tags, `job_type: baseline`. Run
+  with `--no_compile`.
+- Sanity checks: the same list as Med-NCA (unit shape, parity, `fast_dev_run`, overfit one
+  batch, peak memory, stage composition = `forward_feature_maps`, checkpointing on = off).
+- Throughput: measure it first. Optimise only if needed, under the same rules as Med-NCA.
+- Results go in `experiments/octreenca/README.md` and next to Med-NCA in the results table.
+
+## Follow-ups (not now)
+- Learned 1×1 head on hidden channels; more NCA steps.
+- Per-pixel variance over `n_eval_runs` as an uncertainty/QC map.
+- Whole-ROI inference without tiling (NCA is local and translation-invariant).

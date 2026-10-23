@@ -182,7 +182,7 @@ Per class, the two runs differ in both directions, by more than the overall gap:
 | 9 Bronchial epithelium | 0.345 | 0.240 |
 | 14 Liver | 0.537 | 0.387 |
 
-(Classes with a difference of 5 pt or more; the full table is in `docs/progress.md`.)
+(Classes with a difference of 5 pt or more; the full table is in `docs/nca_baselines.md`.)
 
 Reading: the 10× more weight updates of upstream's schedule buy under 1 pt mIoU at 2.2× the
 wall time. With one seed per setting and per-class swings of ±10–20 pt, the gap is within
