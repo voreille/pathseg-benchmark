@@ -17,7 +17,7 @@ from torch.optim.lr_scheduler import PolynomialLR
 from torchmetrics.classification import MulticlassF1Score, MulticlassJaccardIndex
 
 from pathseg.models.semantic_segmenter import SemanticSegmenter
-from pathseg.training.histo_loss import CrossEntropyDiceLoss
+from pathseg.training.histo_loss import CrossEntropyDiceLoss, UpstreamDiceBCELoss
 from pathseg.training.lightning_module import LightningModule
 
 
@@ -134,6 +134,10 @@ def build_criterion(
         return nn.CrossEntropyLoss(ignore_index=ignore_idx, weight=weight)
     if spec.loss_name == "cross_entropy_dice":
         return CrossEntropyDiceLoss(ignore_index=ignore_idx, weight=weight)
+    if spec.loss_name == "upstream_dice_bce":
+        if weight is not None:
+            raise ValueError("Loss 'upstream_dice_bce' takes no class weights.")
+        return UpstreamDiceBCELoss(ignore_index=ignore_idx)
 
     raise ValueError(f"Unknown loss {spec.loss_name!r} for task {spec.name!r}.")
 
