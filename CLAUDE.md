@@ -37,6 +37,8 @@ comparable. **Do not change its behaviour** (additive extensions: see "Conventio
     knob that silently overrides an existing config field (like the former
     `MedNCATraining(loss=...)` vs `loss_name`).
 - One change per commit, clear messages.
+- No Claude attribution in commits or PRs: no `Co-Authored-By: Claude ...` or
+  `Claude-Session: ...` trailers, no "Generated with Claude Code" footer.
 - Outputs (checkpoints, wandb) stay out of git.
 
 ## Gotchas
